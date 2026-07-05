@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   ADULT_MAX_AGE_YEARS,
   ADULT_MIN_AGE_YEARS,
@@ -29,11 +29,7 @@ import {
   type SimConfig,
 } from '../../../src/shared/types';
 
-let names: ReturnType<typeof makeNameGenerator>;
-
-beforeEach(() => {
-  names = makeNameGenerator(createRng(9));
-});
+const names = makeNameGenerator(createRng(9));
 
 describe('createPerson', () => {
   it('creates an adult within the 16-40y window', () => {
@@ -110,8 +106,12 @@ describe('createPerson', () => {
   });
 
   it('is deterministic for a fixed seed', () => {
-    const a = createPerson(1, 0, 'opus', { x: 1, y: 1 }, names, createRng(99));
-    const b = createPerson(1, 0, 'opus', { x: 1, y: 1 }, names, createRng(99));
+    // Fresh, identically-seeded name generators per compared call: `names` is
+    // shared stateful across the population (required for name diversity),
+    // so reusing it here would make a's and b's names differ merely because
+    // b's draw comes after a's in the same stream.
+    const a = createPerson(1, 0, 'opus', { x: 1, y: 1 }, makeNameGenerator(createRng(9)), createRng(99));
+    const b = createPerson(1, 0, 'opus', { x: 1, y: 1 }, makeNameGenerator(createRng(9)), createRng(99));
     expect(a).toEqual(b);
   });
 });
@@ -193,8 +193,10 @@ describe('createChild', () => {
   it('is deterministic for a fixed seed', () => {
     const mother = parent(1, 'opus', 'f');
     const father = parent(2, 'haiku', 'm');
-    const a = createChild(3, mother, father, names, createRng(55));
-    const b = createChild(3, mother, father, names, createRng(55));
+    // Fresh, identically-seeded name generators per compared call — see the
+    // comment on createPerson's determinism test above.
+    const a = createChild(3, mother, father, makeNameGenerator(createRng(9)), createRng(55));
+    const b = createChild(3, mother, father, makeNameGenerator(createRng(9)), createRng(55));
     expect(a).toEqual(b);
   });
 });
@@ -263,9 +265,21 @@ describe('initPopulation', () => {
 
   it('is deterministic for a fixed seed', () => {
     const config: SimConfig = { seed: 77, mode: 'civs', mapSize: 'medium', startPopulation: 200 };
-    const a = initPopulation(config, world, names, createRng(config.seed));
-    const b = initPopulation(config, world, names, createRng(config.seed));
+    // Fresh, identically-seeded name generators per compared call — with the
+    // shared stateful `names` above, the two calls would draw from different
+    // points in the same name stream and never produce equal `name` fields.
+    const a = initPopulation(config, world, makeNameGenerator(createRng(9)), createRng(config.seed));
+    const b = initPopulation(config, world, makeNameGenerator(createRng(9)), createRng(config.seed));
     expect(a.people).toEqual(b.people);
     expect(a.civs).toEqual(b.civs);
+  });
+
+  it('gives same-sex people distinct names across a mixed population (guards name-collision bug)', () => {
+    const config: SimConfig = { seed: 5, mode: 'mixed', mapSize: 'medium', startPopulation: 200 };
+    const { people } = initPopulation(config, world, names, createRng(config.seed));
+    const maleNames = new Set(people.filter((p) => p.sex === 'm').map((p) => p.name));
+    const femaleNames = new Set(people.filter((p) => p.sex === 'f').map((p) => p.name));
+    expect(maleNames.size).toBeGreaterThanOrEqual(10);
+    expect(femaleNames.size).toBeGreaterThanOrEqual(10);
   });
 });

@@ -18,7 +18,6 @@ import {
 } from '../../shared/types';
 import type { Rng } from '../rng';
 import type { NameGen } from '../names';
-import { makeNameGenerator } from '../names';
 import { isHabitable, type World } from '../world/terrain';
 
 export const ADULT_MIN_AGE_YEARS = 16;
@@ -116,13 +115,12 @@ export function createPerson(
 ): Person {
   const sex: 'm' | 'f' = rng.chance(0.5) ? 'm' : 'f';
   const ageYears = rng.range(ADULT_MIN_AGE_YEARS, ADULT_MAX_AGE_YEARS);
-  const personNameGen = makeNameGenerator(rng.split('name'));
   return {
     id,
     alive: true,
     ageTicks: Math.round(ageYears * YEAR_TICKS),
     sex,
-    name: personNameGen.person(sex),
+    name: names.person(sex),
     pos: { x: pos.x, y: pos.y },
     civId,
     settlementId: null,
@@ -183,14 +181,13 @@ export function createChild(id: number, mother: Person, father: Person, names: N
   };
   const lineage = rng.pick([mother.lineage, father.lineage]);
   const sex: 'm' | 'f' = rng.chance(0.5) ? 'm' : 'f';
-  const childNameGen = makeNameGenerator(rng.split('name'));
 
   return {
     id,
     alive: true,
     ageTicks: 0,
     sex,
-    name: childNameGen.person(sex),
+    name: names.person(sex),
     pos: { x: mother.pos.x, y: mother.pos.y },
     civId: mother.civId,
     settlementId: mother.settlementId,
