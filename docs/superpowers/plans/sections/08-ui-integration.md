@@ -365,6 +365,36 @@ body {
   background: var(--lineage-opus);
 }
 
+/* ---- Skill gauge bars (inspector's Skills panel) ---- */
+
+.gauge-fill.farming {
+  background: var(--civ-color-2);
+}
+
+.gauge-fill.gathering {
+  background: var(--lineage-haiku);
+}
+
+.gauge-fill.building {
+  background: var(--terrain-mountain);
+}
+
+.gauge-fill.crafting {
+  background: var(--lineage-opus);
+}
+
+.gauge-fill.fighting {
+  background: var(--civ-color-0);
+}
+
+.gauge-fill.healing {
+  background: var(--civ-color-1);
+}
+
+.gauge-fill.teaching {
+  background: var(--civ-color-3);
+}
+
 /* ---- Lineage badges ---- */
 
 .badge-lineage {
@@ -1042,14 +1072,14 @@ git commit -m "feat(ui): dom helper, dark theme, app shell, and setup screen" -m
 **Interfaces:**
 
 Consumes:
-- From `src/shared/types.ts` (Task 3): `SimConfig`
-- From `src/shared/protocol.ts` (Tasks 35/37): `UiToWorker`, `WorkerToUi`, `Snapshot`, `PersonDetail`, `SPEED_PRESETS`, `SKIP_GENERATION_TICKS`
+- From `src/shared/types.ts` (Task 3): `SimConfig`, `Terrain`
+- From `src/shared/protocol.ts` (Tasks 35/37/40): `UiToWorker`, `WorkerToUi`, `Snapshot`, `PersonDetail`, `SPEED_PRESETS`, `SKIP_GENERATION_TICKS`
 - From `src/ui/dom.ts` (Task 38): `el`
 - From `src/ui/main.ts` (Task 38): `pendingConfig` (read once when the run screen mounts), the DOM containers `#topbar-controls`, `#map-canvas-container`/`#map-canvas`, `#dock-inspector`, `#dock-dashboard`, `#dock-feed`, `#topbar-io` (ids only — this task fills `#topbar-controls`; the other containers stay empty placeholders until Tasks 40-44)
 - Tests construct `SimClient` against a hand-rolled fake `Worker`-shaped object (no real `Worker`/module workers exist under jsdom) — see Step 1's `FakeWorker` class, which is test-only code, not a project export
 
 Produces:
-- (in `src/ui/client.ts`) `export class SimClient` — contract shape verbatim (`start(config)`, `send(msg)`, `onSnapshot(cb)`, `onInspect(cb)`, `onSerialized(cb)`, `onError(cb)`), **plus** an additive constructor parameter this section's deviation 1 requires: `constructor(opts?: { workerFactory?: () => Worker; recover?: () => Promise<string | null> })`. `workerFactory` defaults to `() => new Worker(new URL('../engine/worker.ts', import.meta.url), { type: 'module' })` (the contract's exact construction expression) and exists purely so tests can inject a fake; `recover` defaults to `null` (never called). On receiving a `{ type: 'error' }` message from the worker, `SimClient` first forwards the error to every `onError` subscriber, and **then**, if `recover` is non-null, calls it; if it resolves to a non-null JSON string, `SimClient` discards the crashed worker, constructs a fresh one via `workerFactory`, and sends `{ type: 'load', json }` to resume from that save (this is the concrete "auto-restart from last autosave" behavior the contract names; Task 44 is the first task to actually pass a `recover` that talks to IndexedDB — until then every consumer that omits `recover` gets exactly today's contract-only wrapper with no auto-restart).
+- (in `src/ui/client.ts`) `export class SimClient` — contract shape verbatim (`start(config)`, `send(msg)`, `onSnapshot(cb)`, `onInspect(cb)`, `onSerialized(cb)`, `onError(cb)`), **plus** an additive `onTerrain(cb: (tiles: { terrain: Terrain }[], worldSize: number) => void): void` subscriber (Task 40's protocol addition — fired once per `'terrain'` message from the worker) and an additive constructor parameter this section's deviation 1 requires: `constructor(opts?: { workerFactory?: () => Worker; recover?: () => Promise<string | null> })`. `workerFactory` defaults to `() => new Worker(new URL('../engine/worker.ts', import.meta.url), { type: 'module' })` (the contract's exact construction expression) and exists purely so tests can inject a fake; `recover` defaults to `null` (never called). On receiving a `{ type: 'error' }` message from the worker, `SimClient` first forwards the error to every `onError` subscriber, and **then**, if `recover` is non-null, calls it; if it resolves to a non-null JSON string, `SimClient` discards the crashed worker, constructs a fresh one via `workerFactory`, and sends `{ type: 'load', json }` to resume from that save (this is the concrete "auto-restart from last autosave" behavior the contract names; Task 44 is the first task to actually pass a `recover` that talks to IndexedDB — until then every consumer that omits `recover` gets exactly today's contract-only wrapper with no auto-restart).
 - (in `src/ui/controls.ts`) `export interface ControlsHandle { root: HTMLElement; setReadout(year: number, season: string, population: number): void }` and `export function renderControls(container: HTMLElement, client: SimClient): ControlsHandle` — additive (contract names the file and its role, "time control bar ... calling SimClient.send", without a named export): renders pause/1×/10×/60×/360×/1000× buttons (data-testids `speed-0`, `speed-1`, `speed-10`, `speed-60`, `speed-360`, `speed-1000`, values taken from `SPEED_PRESETS` in order, `speed-0` labeled "Pause"), a "Skip generation" button (`data-testid="skip-generation"`) that sends `{ type: 'step', n: -1 }` (the worker's `SKIP_GENERATION_TICKS` sentinel, per Task 37), and a live year/season/population readout (`data-testid="readout"`) updated by `setReadout` — which `main.ts`'s wiring (Step 6 below) calls from every `onSnapshot` callback with `Math.floor(snapshot.tick / 360)`, `snapshot.season`, `snapshot.population`.
 - (in `src/ui/main.ts`, this task's modification) — no new exports; `mountApp`'s Begin handler now also constructs a real `SimClient`, calls `client.start(pendingConfig)`, and calls `renderControls(document.getElementById('topbar-controls')!, client)`, stashing `client` on a module-level `let activeClient: SimClient | null` so Tasks 40-44 (which each modify `main.ts` again) can read it without re-constructing a second worker.
 
@@ -1154,6 +1184,16 @@ describe('SimClient subscriptions', () => {
     expect(cb).toHaveBeenCalledWith('boom');
   });
 
+  it('onTerrain fires with the tiles array and worldSize', () => {
+    const { client, worker } = makeClient();
+    client.start(config);
+    const cb = vi.fn();
+    client.onTerrain(cb);
+    const tiles = [{ terrain: 'plains' as const }, { terrain: 'water' as const }];
+    worker.emit({ type: 'terrain', tiles, worldSize: 96 });
+    expect(cb).toHaveBeenCalledWith(tiles, 96);
+  });
+
   it('supports multiple subscribers to the same event', () => {
     const { client, worker } = makeClient();
     client.start(config);
@@ -1237,7 +1277,7 @@ Expected: FAIL — `Error: Failed to resolve import "../../src/ui/client" from "
 Create `src/ui/client.ts` with exactly:
 
 ```ts
-import type { SimConfig } from '../shared/types';
+import type { SimConfig, Terrain } from '../shared/types';
 import type { PersonDetail, Snapshot, UiToWorker, WorkerToUi } from '../shared/protocol';
 
 export interface SimClientOptions {
@@ -1268,6 +1308,7 @@ export class SimClient {
   private readonly inspectCbs: ((d: PersonDetail | null) => void)[] = [];
   private readonly serializedCbs: ((json: string) => void)[] = [];
   private readonly errorCbs: ((message: string) => void)[] = [];
+  private readonly terrainCbs: ((tiles: { terrain: Terrain }[], worldSize: number) => void)[] = [];
 
   constructor(opts: SimClientOptions = {}) {
     this.workerFactory = opts.workerFactory ?? defaultWorkerFactory;
@@ -1296,6 +1337,9 @@ export class SimClient {
       case 'error':
         for (const cb of this.errorCbs) cb(msg.message);
         this.attemptRecovery();
+        return;
+      case 'terrain':
+        for (const cb of this.terrainCbs) cb(msg.tiles, msg.worldSize);
         return;
     }
   }
@@ -1339,6 +1383,11 @@ export class SimClient {
   onError(cb: (message: string) => void): void {
     this.errorCbs.push(cb);
   }
+
+  /** Additive (Task 40's terrain-wiring addition to the WorkerToUi union). */
+  onTerrain(cb: (tiles: { terrain: Terrain }[], worldSize: number) => void): void {
+    this.terrainCbs.push(cb);
+  }
 }
 ```
 
@@ -1353,10 +1402,10 @@ npx vitest run tests/ui/client.test.ts
 Expected: PASS —
 
 ```
- ✓ tests/ui/client.test.ts (10 tests)
+ ✓ tests/ui/client.test.ts (11 tests)
 
  Test Files  1 passed (1)
-      Tests  10 passed (10)
+      Tests  11 passed (11)
 ```
 
 - [ ] **Step 5: Write the failing `controls.ts` tests**
@@ -1707,7 +1756,7 @@ npx vitest run tests/ui
 npm run typecheck
 ```
 
-Expected: `Test Files  6 passed (6)`, `Tests  40 passed (40)` (dom 7 + setup 10 + main 3 + client 10 + controls 6 + main-controls-wiring 1 = 37 — if your running count differs, confirm it equals the sum of every UI test file's own individually-reported count from this section so far); `npm run typecheck` exits 0.
+Expected: `Test Files  6 passed (6)`, `Tests  38 passed (38)` (dom 7 + setup 10 + main 3 + client 11 + controls 6 + main-controls-wiring 1 = 38 — if your running count differs, confirm it equals the sum of every UI test file's own individually-reported count from this section so far); `npm run typecheck` exits 0.
 
 - [ ] **Step 13: Commit**
 
@@ -1722,12 +1771,15 @@ git commit -m "feat(ui): SimClient worker wrapper with recover hook, and time co
 
 **Files:**
 - Create: `src/ui/map.ts`
+- Modify: `src/shared/protocol.ts` (adds a one-time `'terrain'` `WorkerToUi` message and the `WorkerState` plumbing to send it once — see this task's terrain-wiring note; additive, widens the existing union, no existing branch changes shape)
+- Modify: `src/engine/worker.ts` (sends the new `'terrain'` reply once, immediately after `'ready'`, on `'init'` and `'load'`)
 - Test: `tests/ui/map.test.ts`
+- Test: `tests/engine/worker-protocol.test.ts` (Task 37's file; this task appends terrain-reply coverage — see Step 5 below)
 
 **Interfaces:**
 
 Consumes:
-- From `src/shared/types.ts` (Task 3): `Vec2`, `Terrain`, `LINEAGES`, `Lineage`
+- From `src/shared/types.ts` (Task 3): `Vec2`, `Terrain`, `Tile`, `LINEAGES`, `Lineage`
 - From `src/shared/protocol.ts` (Task 35): `Snapshot`, `SettlementView`, `MOOD_ORDER`
 - Tests use no other project imports beyond `map.ts` and hand-built `Snapshot`-shaped fixtures (no real canvas 2D context is available under jsdom, so canvas-drawing code paths are exercised only far enough to not throw — see Step 1's minimal 2D context stub — while the pure coordinate/pick functions are tested exhaustively with real numeric assertions)
 
@@ -1741,10 +1793,12 @@ Produces (section deviation 2 — pure functions extracted alongside the contrac
 - `export function clampZoom(zoom: number): number` — clamps to `[0.5, 24]`, the contract's exact wheel-zoom bounds.
 - `export interface PickableAgent { id: number; pos: Vec2 }` and `export function pickPerson(agents: readonly PickableAgent[], screenPoint: Vec2, camera: Camera, viewportWidth: number, viewportHeight: number, maxScreenDist: number): number | null` — returns the id of the nearest agent whose screen distance to `screenPoint` is `<= maxScreenDist` (ties broken by lowest id), else `null`. The contract's "click picks nearest agent within 8px" is realized by callers passing `maxScreenDist = 8`.
 - `export interface PickableSettlement { id: number; pos: Vec2 }` and `export function pickSettlement(settlements: readonly PickableSettlement[], screenPoint: Vec2, camera: Camera, viewportWidth: number, viewportHeight: number, maxScreenDist: number): number | null` — identical shape, contract's "within 12px" realized by callers passing `maxScreenDist = 12`.
-- `export class MapView` — contract shape verbatim (`constructor(canvas)`, `render(snapshot)`, `onPickPerson(cb)`, `onPickSettlement(cb)`). Internally: an offscreen terrain `HTMLCanvasElement` cached across `render` calls and only redrawn when `snapshot.worldSize` changes (rendered once per world, per the section brief) or when a `Tile[]` array is supplied via the additive method `setTerrain(tiles: { terrain: Terrain }[]): void` (called once by `main.ts` right after the first snapshot arrives — see Task 41's wiring note; `Snapshot` itself carries no per-tile terrain array, only `territory`, so `MapView` cannot derive terrain from `Snapshot` alone and `setTerrain` is how the caller supplies it once). Pan is wheel-independent left-mouse drag on the canvas (`mousedown`/`mousemove`/`mouseup`, updating `camera.x`/`camera.y` in world units by `-deltaScreenPixels / camera.zoom`); zoom is `wheel`, anchored at the cursor (the world point under the cursor stays under the cursor after the zoom changes — computed via `screenToWorld` before the zoom change and `worldToScreen`'s inverse after), clamped via `clampZoom`. Rendering runs on a `requestAnimationFrame` loop that only redraws when a `dirty` flag is set (set by `render(snapshot)` being called with a new snapshot, or by any pan/zoom/resize interaction) — `render` itself does not draw synchronously; it stores the latest snapshot and sets `dirty = true`, and the rAF callback performs the actual canvas drawing exactly once per dirty frame. A single click (a `mousedown`→`mouseup` pair with total drag distance `< 3` screen pixels) calls `pickPerson` first (radius 8) and, only if that returns `null`, `pickSettlement` (radius 12), firing the matching `onPickPerson`/`onPickSettlement` subscriber.
+- `export class MapView` — contract shape verbatim (`constructor(canvas)`, `render(snapshot)`, `onPickPerson(cb)`, `onPickSettlement(cb)`). Internally: an offscreen terrain `HTMLCanvasElement` cached across `render` calls and only redrawn when `snapshot.worldSize` changes (rendered once per world, per the section brief) or when a `Tile[]` array is supplied via the additive method `setTerrain(tiles: readonly { terrain: Terrain }[], worldSize: number): void` (called once by `main.ts` as soon as the worker's `'terrain'` message arrives — see this task's "Terrain wiring" note and Task 41's Step 9; `Snapshot` itself carries no per-tile terrain array, only `territory`, so `MapView` cannot derive terrain from `Snapshot` alone and `setTerrain` is how the caller supplies it once per world). Pan is wheel-independent left-mouse drag on the canvas (`mousedown`/`mousemove`/`mouseup`, updating `camera.x`/`camera.y` in world units by `-deltaScreenPixels / camera.zoom`); zoom is `wheel`, anchored at the cursor (the world point under the cursor stays under the cursor after the zoom changes — computed via `screenToWorld` before the zoom change and `worldToScreen`'s inverse after), clamped via `clampZoom`. Rendering runs on a `requestAnimationFrame` loop that only redraws when a `dirty` flag is set (set by `render(snapshot)` being called with a new snapshot, or by any pan/zoom/resize interaction) — `render` itself does not draw synchronously; it stores the latest snapshot and sets `dirty = true`, and the rAF callback performs the actual canvas drawing exactly once per dirty frame. A single click (a `mousedown`→`mouseup` pair with total drag distance `< 3` screen pixels) calls `pickPerson` first (radius 8) and, only if that returns `null`, `pickSettlement` (radius 12), firing the matching `onPickPerson`/`onPickSettlement` subscriber.
 
-Wiring notes for Task 41+ (binding):
-- `main.ts` (further modified starting in this task) constructs `new MapView(document.getElementById('map-canvas') as HTMLCanvasElement)` once, right after `client.start(config)`, and calls `mapView.render(snapshot)` inside the same `onSnapshot` subscription that already updates `latestSnapshot`/the controls readout. It also calls `mapView.setTerrain(...)` exactly once — deferred to Task 44's replay wiring note, since terrain tiles are not part of `Snapshot` and no earlier UI task has a source for them; **until Task 44, the terrain layer is a solid `TERRAIN_COLORS.plains` background** (a documented, harmless placeholder — `MapView` renders correctly with agents/settlements/territory regardless, it simply skips the per-tile terrain mosaic until `setTerrain` is first called). This is recorded here, not as a deviation, because the contract's `MapView` never specifies who supplies terrain tiles.
+Terrain wiring (this task, closes the "terrain never reaches the live map view" gap):
+- `WorkerToUi` gains one additive member: `| { type: 'terrain'; tiles: { terrain: Terrain }[]; worldSize: number }` (widening the union the contract declares in Tasks 35/37 — no existing branch's shape changes, so every existing `switch (msg.type)` in `client.ts`/tests keeps compiling unchanged). `WorkerState` gains a `terrainSent: boolean` field (`false` initially). In `handleMessage`'s `'init'` and `'load'` branches (`src/shared/protocol.ts`, Task 37's file), after building the fresh `Simulation`, the reducer now also returns a `{ type: 'terrain', tiles: sim.ctx.world.tiles, worldSize: sim.ctx.world.size }` reply (reading `World.tiles`/`World.size`, Task 4/5's exports) immediately before the existing `'ready'`/snapshot replies, and sets `terrainSent: true` on the returned state (`init`/`load` always resend terrain since the world may have changed size or regenerated). `src/engine/worker.ts`'s `postReply`/transfer logic (Task 37) requires no change: `tiles`/`worldSize` are plain JSON-serializable data, not `Transferable`, so `transferablesOf` simply returns `[]` for the new message type like it already does for `'ready'`/`'error'`.
+- `SimClient` (Task 39) gains an additive `onTerrain(cb: (tiles: { terrain: Terrain }[], worldSize: number) => void): void` subscriber list, handled in `handleMessage`'s `switch` alongside `'snapshot'`/`'inspect'`/etc.
+- `main.ts` (further modified starting in Task 41, where `MapView` is first constructed) constructs `new MapView(document.getElementById('map-canvas') as HTMLCanvasElement)` once, right after `client.start(config)`, and calls `mapView.render(snapshot)` inside the same `onSnapshot` subscription that already updates `latestSnapshot`/the controls readout. It also calls `client.onTerrain((tiles, worldSize) => mapView.setTerrain(tiles, worldSize))` once, right after constructing `mapView` — see Task 41's Step 9 wiring, which is where this call is actually added to the file. Until the worker's first `'terrain'` reply arrives (a handful of milliseconds after `'init'`/`'load'`, always before the first snapshot a user could plausibly act on), the terrain layer is a solid `TERRAIN_COLORS.plains` background — a harmless, momentary placeholder, not a permanent one.
 - `onPickPerson`/`onPickSettlement` subscribers are wired by Task 41 (`onPickPerson` → send `{ type: 'inspect', personId }` and switch the dock to the Inspector tab).
 
 - [ ] **Step 1: Write the failing map tests**
@@ -2401,7 +2455,158 @@ Expected: PASS —
 
 If the click-picks-agent test fails because `canvas.clientWidth`/`clientHeight` read `0` under jsdom even after `Object.defineProperty`, confirm `viewportSize()`'s fallback order is `clientWidth || width || 800` exactly as written above — jsdom canvases report `width`/`height` attribute values (defaulting to 300x150) when `clientWidth` is stubbed to a truthy `400`, which takes precedence correctly.
 
-- [ ] **Step 5: Typecheck**
+- [ ] **Step 5: Append the failing terrain-reply test to `tests/engine/worker-protocol.test.ts` (Task 37's file)**
+
+This closes the "terrain never reaches the live map view" gap: the live worker never had a way to send `World.tiles` to the UI thread. Open `tests/engine/worker-protocol.test.ts` and add the following `describe` block at the end of the file (Task 37's existing blocks and its top-level `config`/imports stay unchanged, except the import line, updated below):
+
+Update the file's import line to include `WorkerToUi`:
+
+```ts
+import { handleMessage, type WorkerState, type UiToWorker, type WorkerToUi } from '../../src/shared/protocol';
+```
+
+Append:
+
+```ts
+
+describe('handleMessage — terrain reply', () => {
+  const initialState: WorkerState = {
+    sim: null,
+    ticksPerSecond: 0,
+    ticksSinceLastSnapshot: 0,
+    snapshotsTaken: 0,
+    msAccumulatorSinceSnapshot: 0,
+    terrainSent: false,
+  };
+
+  it('sends a terrain reply immediately after ready on init', () => {
+    const config = { seed: 1, mode: 'civs', mapSize: 'small', startPopulation: 200 } as const;
+    const { state, replies } = handleMessage(initialState, { type: 'init', config } as UiToWorker);
+    const terrainReply = replies.find((r): r is Extract<WorkerToUi, { type: 'terrain' }> => r.type === 'terrain');
+    expect(terrainReply).toBeDefined();
+    expect(terrainReply?.worldSize).toBeGreaterThan(0);
+    expect(terrainReply?.tiles.length).toBe((terrainReply?.worldSize ?? 0) ** 2);
+    expect(replies.findIndex((r) => r.type === 'terrain')).toBeLessThan(replies.findIndex((r) => r.type === 'snapshot'));
+    expect(state.terrainSent).toBe(true);
+  });
+
+  it('sends a fresh terrain reply on load (world may differ from the previous run)', () => {
+    const config = { seed: 1, mode: 'civs', mapSize: 'small', startPopulation: 200 } as const;
+    const { state: afterInit } = handleMessage(initialState, { type: 'init', config } as UiToWorker);
+    const json = handleMessage(afterInit, { type: 'serialize' }).replies.find((r) => r.type === 'serialized');
+    if (json === undefined || json.type !== 'serialized') throw new Error('expected a serialized reply');
+    const { replies } = handleMessage(afterInit, { type: 'load', json: json.json });
+    expect(replies.some((r) => r.type === 'terrain')).toBe(true);
+  });
+});
+```
+
+- [ ] **Step 6: Run the test and confirm it fails**
+
+Run:
+
+```
+npx vitest run tests/engine/worker-protocol.test.ts
+```
+
+Expected: FAIL — `terrainSent` does not exist on `WorkerState`'s type (typecheck failure surfaced by vitest) and no `'terrain'` reply is ever produced, so `terrainReply` is `undefined` and `expect(terrainReply).toBeDefined()` fails.
+
+- [ ] **Step 7: Add the `'terrain'` message and its emission to `src/shared/protocol.ts` (Task 37's file)**
+
+Open `src/shared/protocol.ts` and apply these changes:
+
+Widen the `WorkerToUi` union (add one member; every existing member is untouched):
+
+```ts
+export type WorkerToUi =
+  | { type: 'ready' }
+  | { type: 'snapshot'; snapshot: Snapshot }
+  | { type: 'inspect'; detail: PersonDetail | null }
+  | { type: 'serialized'; json: string }
+  | { type: 'error'; message: string }
+  | { type: 'terrain'; tiles: { terrain: Terrain }[]; worldSize: number };
+```
+
+Add `terrainSent: boolean` to `WorkerState`:
+
+```ts
+export interface WorkerState {
+  sim: Simulation | null;
+  ticksPerSecond: number;
+  ticksSinceLastSnapshot: number;
+  snapshotsTaken: number;
+  msAccumulatorSinceSnapshot: number;
+  terrainSent: boolean;
+}
+```
+
+Add a small helper next to `snapshotReply`:
+
+```ts
+function terrainReply(sim: Simulation): WorkerToUi {
+  return {
+    type: 'terrain',
+    tiles: sim.ctx.world.tiles.map((t) => ({ terrain: t.terrain })),
+    worldSize: sim.ctx.world.size,
+  };
+}
+```
+
+Update the `'init'` branch to emit it first, ahead of `'ready'`:
+
+```ts
+      case 'init': {
+        const sim = new Simulation(msg.config);
+        const next: WorkerState = {
+          sim,
+          ticksPerSecond: 0,
+          ticksSinceLastSnapshot: 0,
+          snapshotsTaken: 0,
+          msAccumulatorSinceSnapshot: 0,
+          terrainSent: true,
+        };
+        const { state: withSnap, reply } = snapshotReply(next, true);
+        return { state: withSnap, replies: [terrainReply(sim), { type: 'ready' }, reply] };
+      }
+```
+
+Update the `'load'` branch identically:
+
+```ts
+      case 'load': {
+        const sim = deserialize(msg.json);
+        const next: WorkerState = {
+          sim,
+          ticksPerSecond: 0,
+          ticksSinceLastSnapshot: 0,
+          snapshotsTaken: 0,
+          msAccumulatorSinceSnapshot: 0,
+          terrainSent: true,
+        };
+        const { state: withSnap, reply } = snapshotReply(next, true);
+        return { state: withSnap, replies: [terrainReply(sim), reply] };
+      }
+```
+
+Every other branch (`'setSpeed'`, `'step'`, `'inspect'`, `'serialize'`) is untouched — none of them constructs a new `Simulation`, so none needs to resend terrain. Every existing `WorkerState` object literal elsewhere in `protocol.ts`/`worker.ts` (there are none outside `handleMessage`'s own branches per Task 37's file) needs no further edit.
+
+Also confirm `Terrain` is already imported at the top of `protocol.ts` from `./types` (Task 35 already imports `Tile`/`Terrain`-adjacent symbols for `TileGlimpse`; if `Terrain` itself is not yet imported, add it to that same import line).
+
+- [ ] **Step 8: Update `src/engine/worker.ts`'s `transferablesOf` (Task 37's file) — confirm no change needed**
+
+Open `src/engine/worker.ts` and confirm `transferablesOf`'s `switch`/`if` falls through to its default `[]` case for `'terrain'` (the new message carries only plain objects/numbers — no `ArrayBuffer`-backed `Snapshot` fields — so it needs no transfer list entry, exactly like `'ready'`/`'error'`/`'serialized'` already don't). No source change is required in this file; this step is a verification-only checkpoint, not an edit.
+
+- [ ] **Step 9: Run the worker-protocol tests and confirm they pass**
+
+Run:
+
+```
+npx vitest run tests/engine/worker-protocol.test.ts
+```
+
+Expected: PASS, with the two new tests included in the file's total count alongside every test Task 37 already added.
+
+- [ ] **Step 10: Typecheck**
 
 Run:
 
@@ -2411,14 +2616,17 @@ npm run typecheck
 
 Expected: exit code 0, no type errors.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 11: Commit**
 
 Run:
 
 ```
-git add src/ui/map.ts tests/ui/map.test.ts
+git add src/ui/map.ts src/shared/protocol.ts src/engine/worker.ts tests/ui/map.test.ts tests/engine/worker-protocol.test.ts
 git commit -m "feat(ui): canvas map renderer with pan/zoom, territory, and pure pick/transform functions" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+git commit -m "feat(engine): send world terrain to the UI once on init/load so the live map view can render it" -m "Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 ```
+
+(Two commits: the first covers `map.ts`'s own deliverables, the second covers the additive `protocol.ts`/`worker.ts` terrain-wiring change — kept separate since they touch different subsystems, even though both are delivered within this one task.)
 
 ### Task 41: Person inspector and the radar chart primitive (`src/ui/charts.ts` create + `src/ui/inspector.ts`)
 
@@ -2432,7 +2640,7 @@ git commit -m "feat(ui): canvas map renderer with pan/zoom, territory, and pure 
 **Interfaces:**
 
 Consumes:
-- From `src/shared/types.ts` (Task 3): `Morality`
+- From `src/shared/types.ts` (Task 3): `Morality`, `SKILL_NAMES`
 - From `src/shared/protocol.ts` (Tasks 35/37): `PersonDetail`
 - From `src/engine/brains/types.ts` (Task 20): `Temperament` (via `PersonDetail.temperament`)
 - From `src/ui/dom.ts` (Task 38): `el`
@@ -2442,7 +2650,7 @@ Consumes:
 
 Produces:
 - (in `src/ui/charts.ts`) `export function radarChart(canvas: HTMLCanvasElement, axes: string[], values: number[], color: string): void` — contract signature verbatim. Draws `axes.length` equally-spaced spokes from the canvas center (radius = `min(canvas.width, canvas.height) / 2 - 20`, leaving room for axis labels), a background grid at 25/50/75/100% radius, one filled+stroked polygon connecting `values[i]` (each clamped to `[0, 1]` before plotting) along spoke `i`, and a text label for each axis name at 1.15x the max radius along its spoke. Values and axes arrays of mismatched length are handled by iterating `Math.min(axes.length, values.length)` — never throws, never indexes out of bounds. An empty `axes`/`values` array draws only the canvas clear (no grid, no spokes, no polygon) and returns without error.
-- (in `src/ui/inspector.ts`) `export interface InspectorHandle { root: HTMLElement; show(detail: PersonDetail | null): void }` and `export function renderInspector(container: HTMLElement, opts: { onFollow: (personId: number) => void }): InspectorHandle` — additive (contract names the file/role only): `show(null)` renders an empty-state message (`data-testid="inspector-empty"`, text "Click a person on the map to inspect them."); `show(detail)` renders emotion gauge bars (reusing `theme.css`'s `.gauge-row`/`.gauge-fill.<emotion>` classes for `fear`/`joy`/`grief`/`anger`/`hope`, width = `emotions[key] * 100%`), a `radarChart` canvas (`data-testid="morality-radar"`, 200x200) plotting the six `Morality` axes in the fixed order `['care', 'fairness', 'loyalty', 'authority', 'sanctity', 'liberty']` colored by the person's lineage via `LINEAGE_COLORS`, a memory list (`data-testid="memory-list"`, newest-first — `detail.memoriesText` is already newest-first per Task 35's `personDetail`, so this list renders it unmodified — each item additionally shows its year via `Math.floor(tick / 360)`, tick read back off `detail.person.memory[i].tick` in the same index order since `memoriesText[i]` and `person.memory[i]` are index-aligned by construction in Task 35), a relationships list (`data-testid="relationships-list"`, each row's affinity rendered with an inline color: `#76b041` for `affinity > 0`, `#e4572e` for `affinity < 0`, `--color-text-dim` for exactly `0`), a lineage badge (`data-testid="lineage-badge"`, class `badge-lineage <lineage>`) plus the temperament's `quirks` (comma-joined) and `description` paragraph, and a "Follow" button (`data-testid="follow-button"`) that calls `opts.onFollow(detail.person.id)` when clicked. Calling `show` again always fully replaces the previous contents (no stale DOM from a prior person leaks into the next render).
+- (in `src/ui/inspector.ts`) `export interface InspectorHandle { root: HTMLElement; show(detail: PersonDetail | null): void }` and `export function renderInspector(container: HTMLElement, opts: { onFollow: (personId: number) => void }): InspectorHandle` — additive (contract names the file/role only): `show(null)` renders an empty-state message (`data-testid="inspector-empty"`, text "Click a person on the map to inspect them."); `show(detail)` renders emotion gauge bars (reusing `theme.css`'s `.gauge-row`/`.gauge-fill.<emotion>` classes for `fear`/`joy`/`grief`/`anger`/`hope`, width = `emotions[key] * 100%`), a skills panel (`data-testid="skills-panel"`, one `.gauge-row` per `SKILL_NAMES` entry in fixed order `['farming', 'gathering', 'building', 'crafting', 'fighting', 'healing', 'teaching']`, each a `data-testid="skill-bar"` gauge mirroring the emotion-gauge markup exactly — `.gauge-label`/`.gauge-track`/`.gauge-fill` — sourced from `detail.person.skills[name]`, width = `skills[name] * 100%`, satisfying the spec's "Person inspector ... skills" line), a `radarChart` canvas (`data-testid="morality-radar"`, 200x200) plotting the six `Morality` axes in the fixed order `['care', 'fairness', 'loyalty', 'authority', 'sanctity', 'liberty']` colored by the person's lineage via `LINEAGE_COLORS`, a memory list (`data-testid="memory-list"`, newest-first — `detail.memoriesText` is already newest-first per Task 35's `personDetail`, so this list renders it unmodified — each item additionally shows its year via `Math.floor(tick / 360)`, tick read back off `detail.person.memory[i].tick` in the same index order since `memoriesText[i]` and `person.memory[i]` are index-aligned by construction in Task 35), a relationships list (`data-testid="relationships-list"`, each row's affinity rendered with an inline color: `#76b041` for `affinity > 0`, `#e4572e` for `affinity < 0`, `--color-text-dim` for exactly `0`), a lineage badge (`data-testid="lineage-badge"`, class `badge-lineage <lineage>`) plus the temperament's `quirks` (comma-joined) and `description` paragraph, and a "Follow" button (`data-testid="follow-button"`) that calls `opts.onFollow(detail.person.id)` when clicked. Calling `show` again always fully replaces the previous contents (no stale DOM from a prior person leaks into the next render).
 
 Wiring notes for Task 42+ (binding):
 - `main.ts`'s next modification (this task) constructs `renderInspector(document.getElementById('dock-inspector')!, { onFollow: (id) => { client.send({ type: 'inspect', personId: id }); /* map-centering itself is a MapView concern; MapView's public contract (Task 40) has no camera-set method, so "centers the map on person" is satisfied by MapView's own next render placing them on-screen and this handler additionally calling a locally-scoped `centerCameraOn` helper this step adds to `main.ts`, described in Step 9 below */ } })`. It also subscribes `client.onInspect((detail) => inspectorHandle.show(detail))` and wires `mapView.onPickPerson((id) => client.send({ type: 'inspect', personId: id }))`.
@@ -2798,6 +3006,27 @@ describe('renderInspector — populated state', () => {
     expect(container.querySelector('[data-testid="morality-radar"]')).not.toBeNull();
   });
 
+  it('renders a skill bar for every SKILL_NAMES entry with the person\'s skill values', () => {
+    stubAllCanvasContexts();
+    const container = document.createElement('div');
+    const handle = renderInspector(container, { onFollow: () => {} });
+    handle.show(
+      makeDetail({
+        person: makePerson({
+          skills: { farming: 0.2, gathering: 0.5, building: 0.1, crafting: 0, fighting: 0.9, healing: 0, teaching: 0.1 },
+        }),
+      }),
+    );
+    const panel = container.querySelector('[data-testid="skills-panel"]');
+    expect(panel).not.toBeNull();
+    const bars = container.querySelectorAll('[data-testid="skill-bar"]');
+    expect(bars).toHaveLength(7); // SKILL_NAMES.length
+    expect(panel?.textContent).toContain('farming');
+    expect(panel?.textContent).toContain('fighting');
+    const fightingFill = container.querySelector('[data-testid="skill-bar"] .gauge-fill.fighting') as HTMLElement;
+    expect(fightingFill?.getAttribute('style')).toContain('width:90%');
+  });
+
   it('renders the memory list newest-first (unmodified order from PersonDetail)', () => {
     stubAllCanvasContexts();
     const container = document.createElement('div');
@@ -2890,6 +3119,7 @@ import { el } from './dom';
 import { radarChart } from './charts';
 import { LINEAGE_COLORS } from './map';
 import type { PersonDetail } from '../shared/protocol';
+import { SKILL_NAMES } from '../shared/types';
 import type { Emotions } from '../shared/types';
 
 export interface InspectorHandle {
@@ -2949,6 +3179,26 @@ export function renderInspector(container: HTMLElement, opts: { onFollow: (perso
     });
     const gaugesPanel = el('div', { class: 'panel' }, el('h4', { class: 'panel-title' }, 'Emotions'), ...gaugeRows);
 
+    const skillRows = SKILL_NAMES.map((name) => {
+      const pct = Math.round(Math.max(0, Math.min(1, person.skills[name])) * 100);
+      return el(
+        'div',
+        { class: 'gauge-row', 'data-testid': 'skill-bar' },
+        el('span', { class: 'gauge-label' }, name),
+        el(
+          'div',
+          { class: 'gauge-track' },
+          el('div', { class: `gauge-fill ${name}`, style: `width:${pct}%` }),
+        ),
+      );
+    });
+    const skillsPanel = el(
+      'div',
+      { class: 'panel', 'data-testid': 'skills-panel' },
+      el('h4', { class: 'panel-title' }, 'Skills'),
+      ...skillRows,
+    );
+
     const radarCanvas = el('canvas', {
       width: '200',
       height: '200',
@@ -3000,6 +3250,7 @@ export function renderInspector(container: HTMLElement, opts: { onFollow: (perso
     root.appendChild(meta);
     root.appendChild(followButton);
     root.appendChild(gaugesPanel);
+    root.appendChild(skillsPanel);
     root.appendChild(radarPanel);
     root.appendChild(memoryPanel);
     root.appendChild(relationshipsPanel);
@@ -3029,10 +3280,10 @@ npx vitest run tests/ui/inspector.test.ts
 Expected: PASS —
 
 ```
- ✓ tests/ui/inspector.test.ts (10 tests)
+ ✓ tests/ui/inspector.test.ts (11 tests)
 
  Test Files  1 passed (1)
-      Tests  10 passed (10)
+      Tests  11 passed (11)
 ```
 
 - [ ] **Step 9: Wire the inspector into `src/ui/main.ts`**
@@ -3052,6 +3303,9 @@ Inside the `handle.onBegin` callback, after the `client.onSnapshot(...)` subscri
     const mapView = new MapView(document.getElementById('map-canvas') as HTMLCanvasElement);
     client.onSnapshot((snapshot) => {
       mapView.render(snapshot);
+    });
+    client.onTerrain((tiles, worldSize) => {
+      mapView.setTerrain(tiles, worldSize);
     });
 
     const inspectorHandle = renderInspector(document.getElementById('dock-inspector')!, {
@@ -3092,6 +3346,7 @@ vi.mock('../../src/ui/client', () => {
     }
     onSerialized(): void {}
     onError(): void {}
+    onTerrain(): void {}
   }
   return { SimClient: FakeSimClient };
 });
@@ -3199,7 +3454,7 @@ git commit -m "feat(ui): morality radar chart primitive and person inspector pan
 **Interfaces:**
 
 Consumes:
-- From `src/shared/types.ts` (Task 3): `Lineage`, `LINEAGES`, `TechId`
+- From `src/shared/types.ts` (Task 3): `Lineage`, `LINEAGES`, `TechId`, `Morality`
 - From `src/shared/protocol.ts` (Task 35): `CivMetrics`, `Snapshot`
 - From `src/ui/dom.ts` (Task 38): `el`
 - From `src/ui/map.ts` (Task 40): `civColor`, `LINEAGE_COLORS`
@@ -3209,7 +3464,7 @@ Produces:
 - (in `src/ui/charts.ts`, appended) `export function lineChart(canvas: HTMLCanvasElement, series: { label: string; color: string; points: number[] }[], opts?: { yMax?: number }): void` — contract signature verbatim. Clears the canvas, computes `yMax = opts?.yMax ?? max(1, max over all series points)`, draws each series as a polyline (`points[i]` at `x = i / (maxPointCount - 1) * canvasWidth`, `y = canvasHeight - (points[i] / yMax) * canvasHeight`, clamped so a single-point or empty series never divides by zero — a series with 0 points draws nothing, a series with exactly 1 point draws a single 2px-radius dot instead of a line), then a bottom-left legend listing each `series[i].label` in its `color`. Never throws on an empty `series` array (draws only the clear) or on series of differing lengths (each series maps its own points independently over its own length, not a shared index range).
 - (in `src/ui/charts.ts`, appended) `export function stackedAreaChart(canvas: HTMLCanvasElement, series: { label: string; color: string; points: number[] }[]): void` — contract signature verbatim, contract's own annotation "lineage share". Assumes every `series[i].points` is the same length (the lineage-share time series always is, by construction in `dashboard.ts` below) and that at each index the values across series sum to <= 1 (a share); draws `series.length` stacked bands bottom-to-top by cumulative sum at each x position. An empty `series` array or a zero-length `points` array on every series draws only the clear and returns without error (guarded by the same `Math.min` style bounds-checking as `lineChart`, using the shortest series length actually present rather than assuming they match, so a malformed call still never indexes out of bounds).
 - (in `src/ui/dashboard.ts`) `export const METRICS_HISTORY_CAP = 2000` — the ring buffer capacity (section deviation 4).
-- (in `src/ui/dashboard.ts`) `export interface DashboardHandle { root: HTMLElement; onSnapshot(snapshot: Snapshot): void }` and `export function renderDashboard(container: HTMLElement): DashboardHandle` — additive (contract names the file/role, "civ dashboard tabs ... fed by a metrics history ring kept in dashboard", without a named export). `renderDashboard` builds one tab per civ present in the first snapshot it receives (tabs are rebuilt whenever the civ id set changes — e.g. a schism adds one — by comparing the new snapshot's `metrics.map(m => m.civId)` against the previously rendered set) plus, only in mixed mode (detected as `snapshot.metrics.length === 1` and, from that point on, cached — mode never changes mid-run), a headline "Lineage Share" stacked-area chart tab rendered first. Each civ tab shows: a population `lineChart` (single series, that civ's history), tech chips (`data-testid="tech-chip"`, one per `TechId` currently in `civ.techCount`'s underlying `civ.techs` — **note:** `CivMetrics` exposes only `techCount: number`, not the tech id list, so the dashboard renders `techCount` filled chips out of `TECH_IDS.length` total slots, labeled numerically ("3 / 6 technologies") rather than by name — documented here as the concrete, contract-faithful rendering of a metrics-only field), a war banner (`data-testid="war-banner"`, visible only when `civ.atWar` is true, text "At war"), a births/deaths readout (`data-testid="births-deaths"`, this tick's `births`/`deaths` from the metrics entry, cumulative totals are NOT kept — `CivMetrics.births`/`deaths` are documented in the contract as per-tick counters, matching `EngineCtx.counters`'s own reset-every-tick semantics from Task 33), and an avg-emotions `lineChart` (five series, one per `Emotions` key, all sharing `yMax: 1`). `onSnapshot(snapshot)` appends `snapshot.metrics` to the internal per-civ ring (capped at `METRICS_HISTORY_CAP` snapshots per civ, oldest dropped first) and re-renders only the currently active tab's charts (an inactive tab's charts are redrawn lazily the next time its tab button is clicked, reading from the already-updated ring — avoiding wasted canvas work for hidden tabs).
+- (in `src/ui/dashboard.ts`) `export interface DashboardHandle { root: HTMLElement; onSnapshot(snapshot: Snapshot): void }` and `export function renderDashboard(container: HTMLElement): DashboardHandle` — additive (contract names the file/role, "civ dashboard tabs ... fed by a metrics history ring kept in dashboard", without a named export). `renderDashboard` builds one tab per civ present in the first snapshot it receives (tabs are rebuilt whenever the civ id set changes — e.g. a schism adds one — by comparing the new snapshot's `metrics.map(m => m.civId)` against the previously rendered set) plus, only in mixed mode (detected as `snapshot.metrics.length === 1` and, from that point on, cached — mode never changes mid-run), a headline "Lineage Share" stacked-area chart tab rendered first. Each civ tab shows: a population `lineChart` (single series, that civ's history), tech chips (`data-testid="tech-chip"`, one per `TechId` currently in `civ.techCount`'s underlying `civ.techs` — **note:** `CivMetrics` exposes only `techCount: number`, not the tech id list, so the dashboard renders `techCount` filled chips out of `TECH_IDS.length` total slots, labeled numerically ("3 / 6 technologies") rather than by name — documented here as the concrete, contract-faithful rendering of a metrics-only field), a war banner (`data-testid="war-banner"`, visible only when `civ.atWar` is true, text "At war"), a births/deaths readout (`data-testid="births-deaths"`, this tick's `births`/`deaths` from the metrics entry, cumulative totals are NOT kept — `CivMetrics.births`/`deaths` are documented in the contract as per-tick counters, matching `EngineCtx.counters`'s own reset-every-tick semantics from Task 33), an avg-emotions `lineChart` (five series, one per `Emotions` key, all sharing `yMax: 1`), and a **culture-drift `lineChart`** (`data-testid="culture-drift-chart"`, satisfying the spec's "culture-drift visualization" line) — a single series labeled "Culture drift" plotting, at each historical snapshot index `i`, the normalized distance (contract's `cultureDistance`-shaped metric, `0..1`) between that civ's `avgMorality` at index `0` (the civ's first-observed baseline for this dashboard session — cached the first time the civ appears, in the same `history` ring's first entry, never recomputed) and its `avgMorality` at index `i`, computed locally in `dashboard.ts` via an additive helper `moralityDistance(a: Morality, b: Morality): number` (mean absolute difference across the six `Morality` axes, clamped to `[0, 1]`) — this reuses only the `avgMorality` field `CivMetrics` (and thus every `Snapshot`) already carries every tick, so it needs no new engine wiring or worker message; the contract's own `cultureDistance(a, b)` (Task 28, `culture.ts`) is a normalized 0..1 measure over `{ morality, traits }` and is not reachable from the UI thread (it takes an `EngineCtx`, which never crosses the worker boundary), so `moralityDistance` is dashboard.ts's UI-local, contract-faithful stand-in restricted to the `Morality` half of `CultureVector`, documented here as such rather than as a deviation (it does not touch or rename any contract symbol). `onSnapshot(snapshot)` appends `snapshot.metrics` to the internal per-civ ring (capped at `METRICS_HISTORY_CAP` snapshots per civ, oldest dropped first) and re-renders only the currently active tab's charts (an inactive tab's charts are redrawn lazily the next time its tab button is clicked, reading from the already-updated ring — avoiding wasted canvas work for hidden tabs).
 
 Wiring notes for Task 43+ (binding):
 - `main.ts`'s next modification (this task) constructs `const dashboardHandle = renderDashboard(document.getElementById('dock-dashboard')!)` once and calls `dashboardHandle.onSnapshot(snapshot)` inside the same `client.onSnapshot` subscription already updating `latestSnapshot`, the controls readout, and `mapView.render`.
@@ -3608,6 +3863,18 @@ describe('renderDashboard — civs mode (multiple civs, no headline chart)', () 
     expect(readout?.textContent).toContain('9');
     expect(container.textContent).toContain('Sonnet Commonwealth');
   });
+
+  it('renders a culture-drift chart for the active civ tab, growing as avgMorality diverges from the baseline snapshot', () => {
+    stubAllCanvasContexts();
+    const container = document.createElement('div');
+    const handle = renderDashboard(container);
+    handle.onSnapshot(makeSnapshot([makeMetrics({ civId: 0, avgMorality: { care: 0.5, fairness: 0.5, loyalty: 0.5, authority: 0.5, sanctity: 0.5, liberty: 0.5 } })]));
+    expect(container.querySelector('[data-testid="culture-drift-chart"]')).not.toBeNull();
+    // Feeding snapshots whose avgMorality diverges from the first-seen
+    // baseline must not throw, and the chart stays present across updates.
+    handle.onSnapshot(makeSnapshot([makeMetrics({ civId: 0, avgMorality: { care: 0.9, fairness: 0.1, loyalty: 0.5, authority: 0.5, sanctity: 0.5, liberty: 0.5 } })]));
+    expect(container.querySelector('[data-testid="culture-drift-chart"]')).not.toBeNull();
+  });
 });
 
 describe('renderDashboard — mixed mode (single civ, headline lineage-share chart)', () => {
@@ -3663,10 +3930,26 @@ Create `src/ui/dashboard.ts` with exactly:
 import { el } from './dom';
 import { lineChart, stackedAreaChart } from './charts';
 import { civColor } from './map';
-import { LINEAGES, TECH_IDS, type Emotions, type Lineage } from '../shared/types';
+import { LINEAGES, TECH_IDS, type Emotions, type Lineage, type Morality } from '../shared/types';
 import type { CivMetrics, Snapshot } from '../shared/protocol';
 
 export const METRICS_HISTORY_CAP = 2000;
+
+const MORALITY_AXES: (keyof Morality)[] = ['care', 'fairness', 'loyalty', 'authority', 'sanctity', 'liberty'];
+
+/**
+ * UI-local, contract-faithful stand-in for the contract's cultureDistance
+ * (culture.ts, Task 28), which takes an EngineCtx that never crosses the
+ * worker boundary and therefore cannot be called from dashboard.ts. Mean
+ * absolute difference across the six Morality axes, clamped to [0, 1] —
+ * restricted to the Morality half of CultureVector, which is all a
+ * Snapshot's CivMetrics.avgMorality carries.
+ */
+export function moralityDistance(a: Morality, b: Morality): number {
+  let sum = 0;
+  for (const axis of MORALITY_AXES) sum += Math.abs(a[axis] - b[axis]);
+  return Math.max(0, Math.min(1, sum / MORALITY_AXES.length));
+}
 
 export interface DashboardHandle {
   root: HTMLElement;
@@ -3744,6 +4027,20 @@ export function renderDashboard(container: HTMLElement): DashboardHandle {
       { yMax: 1 },
     );
 
+    const baseline = metricsHistory[0]?.avgMorality;
+    const cultureDriftCanvas = el('canvas', { width: '320', height: '120', 'data-testid': 'culture-drift-chart' }) as HTMLCanvasElement;
+    lineChart(
+      cultureDriftCanvas,
+      [
+        {
+          label: 'Culture drift',
+          color: current.color,
+          points: baseline === undefined ? [] : metricsHistory.map((m) => moralityDistance(baseline, m.avgMorality)),
+        },
+      ],
+      { yMax: 1 },
+    );
+
     const warBanner = current.atWar
       ? el('div', { class: 'panel', 'data-testid': 'war-banner' }, 'At war')
       : el('div', {});
@@ -3761,6 +4058,7 @@ export function renderDashboard(container: HTMLElement): DashboardHandle {
       renderTechChips(current.techCount),
       el('div', { class: 'panel' }, el('h4', { class: 'panel-title' }, 'Population'), popCanvas),
       el('div', { class: 'panel' }, el('h4', { class: 'panel-title' }, 'Average Emotions'), emotionCanvas),
+      el('div', { class: 'panel' }, el('h4', { class: 'panel-title' }, 'Culture Drift'), cultureDriftCanvas),
     );
   }
 
@@ -3862,10 +4160,10 @@ npx vitest run tests/ui/dashboard.test.ts
 Expected: PASS —
 
 ```
- ✓ tests/ui/dashboard.test.ts (10 tests)
+ ✓ tests/ui/dashboard.test.ts (11 tests)
 
  Test Files  1 passed (1)
-      Tests  10 passed (10)
+      Tests  11 passed (11)
 ```
 
 - [ ] **Step 9: Wire the dashboard into `src/ui/main.ts`**
@@ -3907,6 +4205,7 @@ vi.mock('../../src/ui/client', () => {
     onInspect(): void {}
     onSerialized(): void {}
     onError(): void {}
+    onTerrain(): void {}
   }
   return { SimClient: FakeSimClient };
 });
@@ -4377,6 +4676,7 @@ vi.mock('../../src/ui/client', () => {
     onInspect(): void {}
     onSerialized(): void {}
     onError(): void {}
+    onTerrain(): void {}
   }
   return { SimClient: FakeSimClient };
 });
@@ -5194,6 +5494,9 @@ export function mountApp(root: HTMLElement): void {
     client.onInspect((detail) => {
       inspectorHandle.show(detail);
     });
+    client.onTerrain((tiles, worldSize) => {
+      mapView.setTerrain(tiles, worldSize);
+    });
     mapView.onPickPerson((personId) => {
       client.send({ type: 'inspect', personId });
     });
@@ -5205,11 +5508,37 @@ export function mountApp(root: HTMLElement): void {
   function wireIoButtons(client: SimClient): void {
     const ioContainer = document.getElementById('topbar-io')!;
     const saveNameInput = el('input', { type: 'text', class: 'btn', 'data-testid': 'save-name-input', value: 'my-run' }) as HTMLInputElement;
+
+    // SimClient's onSerialized is append-only/never-unsubscribed (see
+    // storage.ts's startAutosave doc comment). To avoid leaving a fresh
+    // listener alive on every click — which would fire on every future
+    // serialize response from ANY source (autosave, the other button, or a
+    // later click) and silently save/export under a stale name — this
+    // function registers exactly ONE persistent onSerialized listener, once,
+    // here at setup time. It dispatches based on a `pendingAction` flag set
+    // immediately before each `client.send({ type: 'serialize' })` call and
+    // cleared right after handling, so exactly one action fires per
+    // serialize response no matter how many times Save/Export are clicked.
+    type PendingAction = { kind: 'save'; name: string } | { kind: 'export'; name: string } | null;
+    let pendingAction: PendingAction = null;
+    client.onSerialized((json) => {
+      const action = pendingAction;
+      pendingAction = null;
+      if (action === null) return; // e.g. autosave's own periodic serialize
+      if (action.kind === 'save') {
+        void saveRun(action.name, json);
+        return;
+      }
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = el('a', { href: url, download: `${action.name}.json` }) as HTMLAnchorElement;
+      link.click();
+      URL.revokeObjectURL(url);
+    });
+
     const saveButton = el('button', { class: 'btn', type: 'button', 'data-testid': 'save-button' }, 'Save');
     saveButton.addEventListener('click', () => {
-      client.onSerialized((json) => {
-        void saveRun(saveNameInput.value, json);
-      });
+      pendingAction = { kind: 'save', name: saveNameInput.value };
       client.send({ type: 'serialize' });
     });
 
@@ -5222,13 +5551,7 @@ export function mountApp(root: HTMLElement): void {
 
     const exportButton = el('button', { class: 'btn', type: 'button', 'data-testid': 'export-button' }, 'Export');
     exportButton.addEventListener('click', () => {
-      client.onSerialized((json) => {
-        const blob = new Blob([json], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const link = el('a', { href: url, download: `${saveNameInput.value}.json` }) as HTMLAnchorElement;
-        link.click();
-        URL.revokeObjectURL(url);
-      });
+      pendingAction = { kind: 'export', name: saveNameInput.value };
       client.send({ type: 'serialize' });
     });
 
@@ -5314,6 +5637,7 @@ vi.mock('../../src/ui/client', () => {
       this.serializedCbs.push(cb);
     }
     onError(): void {}
+    onTerrain(): void {}
   }
   return { SimClient: FakeSimClient };
 });

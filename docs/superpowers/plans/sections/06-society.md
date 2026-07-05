@@ -6,7 +6,7 @@ This section builds the seven civilization-dynamics modules under `src/engine/so
 
 1. Per-file structural context interfaces instead of the Task 33 `EngineCtx` (same pattern as Section 3 and Section 4): `SettlementsCtxLike` (Task 26), `InfluenceCtxLike` (Task 27), `CultureCtxLike` (Task 28), `TechnologyCtxLike` (Task 29), `ReligionCtxLike` (Task 30), `EconomyCtxLike` (Task 31), `ConflictCtxLike` (Task 32) each declare only the fields that module reads or writes. `EngineCtx` (Task 33) is a structural superset of all seven, so `Simulation` passes its `ctx` object directly to every one with no adaptation.
 2. `tests/helpers/testCtx.ts`'s `makeTestCtx(overrides?)` returns a concrete object typed as a broad `TestEngineCtx` (a hand-maintained structural superset of every `*CtxLike` in this section, itself a subset of the eventual `EngineCtx`). Because every `*CtxLike` in Tasks 26-32 is structurally satisfied by `TestEngineCtx`, every task's tests pass `makeTestCtx(...)` directly wherever its module's `*CtxLike` is expected — no casting, no per-task duplication of fixture-building code. Task 33 does not use `testCtx.ts` at all; it is a test-only helper.
-3. Extension properties are used on `Person` (`p as Person & { ... }`) for two pieces of per-person state this section needs that are not in the frozen `Person` type: `settlementJoinedAtTick` (Task 28's schism-duration tracking) and `raidCooldownUntil` is NOT used — instead conflict tracks cooldown state on `Civ` via an extension property `_raidHistory` (Task 32). Both are plain JSON-serializable values (numbers / arrays of numbers), so `JSON.stringify` of a person or civ carries them for free (Task 36's `serialize`), and both default to `undefined`/absent with defined fallback behavior when absent, so no other task's fixtures need to set them.
+3. Extension properties are used on `Person` (`p as Person & { ... }`) for two pieces of per-person state this section needs that are not in the frozen `Person` type: `settlementJoinedAtTick` (Task 28's schism-duration tracking) and `raidCooldownUntil` is NOT used — instead conflict tracks cooldown state on `Civ` via an extension property `_raidHistory` (Task 32). Both are plain JSON-serializable values (numbers / arrays of numbers), so `JSON.stringify` of a person or civ carries them for free (Task 36's `serialize`), and both default to `undefined`/absent with defined fallback behavior when absent, so no other task's fixtures need to set them. Task 32 additionally tracks alliances on `Civ` via an extension property `_alliedWith: number[]` (spec section 6's "alliances" requirement — the contract's frozen `Civ` type has no alliance field), populated and consumed entirely inside `conflict.ts` (`maybeFormAlliances`/`isAllied`); also JSON-serializable and absent-safe by the same rule.
 4. `Religion.moralityBias` in the contract is `Partial<Morality>`; Task 30 additionally tracks per-person adoption via an extension property on `Person`, `_beliefZeal: Record<number, number>` (religion id -> local zeal contribution), used only internally by `religion.ts` to compute worship/shrine boosts without mutating the shared `Religion.zeal` field non-deterministically across persons in the same tick. This is additive and does not change any contract field.
 
 ### Task 26: Settlements (`src/engine/society/settlements.ts`) + test fixture helper (`tests/helpers/testCtx.ts`)
@@ -19,9 +19,9 @@ This section builds the seven civilization-dynamics modules under `src/engine/so
 **Interfaces:**
 
 Consumes:
-- From `src/shared/types.ts` (Task 3): `Person`, `Civ`, `Settlement`, `Inventory`, `Vec2`, `Tick`, `TechId`, `StructureKind`, `dist(a: Vec2, b: Vec2): number`, `clamp01(v: number): number`
+- From `src/shared/types.ts` (Task 3): `Person`, `Civ`, `Settlement`, `Inventory`, `Vec2`, `Tick`, `TechId`, `StructureKind`, `Terrain`, `dist(a: Vec2, b: Vec2): number`, `clamp01(v: number): number`
 - From `src/engine/rng.ts` (Task 2): `Rng`; tests also use `createRng(seed: number): Rng`
-- From `src/engine/world/terrain.ts` (Task 5): `World`, `isHabitable(world: World, x: number, y: number): boolean` (Section 2/3 export this helper — a tile is habitable when `terrain !== 'water'`)
+- From `src/engine/world/terrain.ts` (Task 5): `World`, `isHabitable(terrain: Terrain): boolean` (Section 2/3 export this helper — a tile is habitable when `terrain === 'plains' || terrain === 'forest'`)
 - From `src/engine/world/spatial.ts` (Task 7): `SpatialIndex { rebuild(people: Person[]): void; near(pos: Vec2, radius: number): number[] }`
 - From `src/engine/names.ts` (Task 4): `NameGen { person(sex): string; place(): string; civ(): string; religion(): string }`; tests use `makeNameGenerator(rng: Rng): NameGen`
 - Tests also use `createPerson` (Task 8, `src/engine/agents/person.ts`)
@@ -418,7 +418,7 @@ Expected: FAIL — module-resolution error such as `Error: Failed to resolve imp
 Create `src/engine/society/settlements.ts` with exactly:
 
 ```ts
-import type { Civ, Person, Settlement, Tick, Vec2 } from '../../shared/types';
+import type { Civ, Person, Settlement, Terrain, Tick, Vec2 } from '../../shared/types';
 import type { Rng } from '../rng';
 import { isHabitable, type World } from '../world/terrain';
 import type { SpatialIndex } from '../world/spatial';
@@ -487,7 +487,7 @@ function pruneDeadMembers(ctx: SettlementsCtxLike): void {
 
 function dissolveUndersized(ctx: SettlementsCtxLike): void {
   const surviving: Settlement[] = [];
-  for (const s of [...ctx.settlements].sort((a, b) => a.id - b)) {
+  for (const s of [...ctx.settlements].sort((a, b) => a.id - b.id)) {
     if (s.memberIds.length >= DISSOLUTION_MIN_MEMBERS || s.memberIds.length === 0) {
       if (s.memberIds.length > 0) surviving.push(s);
       // a settlement that dropped to 0 members simply vanishes with no stock to return
@@ -529,7 +529,7 @@ function formNewSettlements(ctx: SettlementsCtxLike): void {
 
   for (const p of unsettled) {
     if (claimed.has(p.id)) continue;
-    if (!isHabitable(ctx.world, p.pos.x, p.pos.y)) continue;
+    if (!isHabitable(ctx.world.tileAt(p.pos.x, p.pos.y).terrain)) continue;
 
     const nearbyIds = ctx.spatial
       .near(p.pos, CLUSTER_RADIUS)
@@ -560,7 +560,7 @@ function formNewSettlements(ctx: SettlementsCtxLike): void {
 }
 
 function applyOverflowPressure(ctx: SettlementsCtxLike): void {
-  for (const s of [...ctx.settlements].sort((a, b) => a.id - b)) {
+  for (const s of [...ctx.settlements].sort((a, b) => a.id - b.id)) {
     const civ = civOf(ctx, s.civId);
     if (civ === undefined) continue;
     const capacity = settlementCapacity(s, civ);
@@ -1231,7 +1231,7 @@ interface WithSchismTracker {
  * threshold lose all accumulated duration credit immediately.
  */
 export function maybeSchism(ctx: CultureCtxLike): void {
-  for (const s of [...ctx.settlements].sort((a, b) => a.id - b)) {
+  for (const s of [...ctx.settlements].sort((a, b) => a.id - b.id)) {
     const tracked = s as Settlement & WithSchismTracker;
     const civCult = civCulture(s.civId, ctx);
     const localCult = settlementCulture(s, ctx);
@@ -1617,7 +1617,7 @@ export function isActive(civ: Civ, domain: TechId, ctx: TechnologyCtxLike): bool
  * (writing freezes decay for every domain, including itself).
  */
 export function updateTechnology(ctx: TechnologyCtxLike): void {
-  const civs = [...ctx.civs].sort((a, b) => a.id - b);
+  const civs = [...ctx.civs].sort((a, b) => a.id - b.id);
   for (const civ of civs) {
     const writingFrozen = civ.techs.includes('writing');
     for (const domain of TECH_IDS) {
@@ -2091,7 +2091,7 @@ export function maybeFoundReligion(ctx: ReligionCtxLike): void {
  * tick, +0.001 per shrine present across the religion's civ's settlements.
  */
 export function spreadBeliefs(ctx: ReligionCtxLikeExtended): void {
-  for (const religion of [...ctx.religions].sort((a, b) => a.id - b)) {
+  for (const religion of [...ctx.religions].sort((a, b) => a.id - b.id)) {
     const founder = ctx.people.find((p) => p.id === religion.founderId);
     if (founder === undefined || !founder.alive) continue;
 
@@ -2448,7 +2448,7 @@ function shareRate(p: Person): number {
  * SHARE_DRAW_HUNGER_THRESHOLD) draw up to 1 food from stock when available.
  */
 export function shareWithin(ctx: EconomyCtxLike): void {
-  for (const s of [...ctx.settlements].sort((a, b) => a.id - b)) {
+  for (const s of [...ctx.settlements].sort((a, b) => a.id - b.id)) {
     const members = [...s.memberIds]
       .sort((a, b) => a - b)
       .map((id) => ctx.personById.get(id))
@@ -2499,7 +2499,7 @@ function leaderOfSettlement(s: Settlement, ctx: EconomyCtxLike): Person | null {
 export function tradeBetween(ctx: EconomyCtxLike): void {
   if (ctx.tick % TRADE_INTERVAL !== 0) return;
 
-  const settlements = [...ctx.settlements].sort((a, b) => a.id - b);
+  const settlements = [...ctx.settlements].sort((a, b) => a.id - b.id);
   for (let i = 0; i < settlements.length; i++) {
     for (let j = i + 1; j < settlements.length; j++) {
       const a = settlements[i] as Settlement;
@@ -2603,14 +2603,17 @@ Produces:
 - `export function updateConflict(ctx: ConflictCtxLike): void` — no-op unless `ctx.tick % RAID_CHECK_INTERVAL === 0` (15); for every settlement (ascending id) with a leader (`leaderOf`) satisfying `leader.traits.aggression > RAID_AGGRESSION_THRESHOLD` (0.6) AND (`foodPerCapita(settlement) < RAID_FOOD_THRESHOLD` (0.5) OR `revengeMemorySum(leader) > RAID_REVENGE_THRESHOLD` (0.5)): finds the nearest OTHER-civ settlement within `RAID_TARGET_MAX_DISTANCE` (30); if found, assembles a raid party (up to `RAID_PARTY_MAX_SIZE` (8) living members of the attacking settlement, ascending id, filtered to `traits.aggression > RAID_WILLING_AGGRESSION` (0.4) OR some relationship with `kind === 'loyalty'`-equivalent — see note below — `affinity > RAID_WILLING_LOYALTY` (0.7) to the leader), and resolves the raid via `resolveRaid`.
 - `export function resolveRaid(attackers: Person[], defenders: Person[], attackerCiv: Civ, defenderCiv: Civ, defenderSettlement: Settlement, ctx: ConflictCtxLike): RaidResult` — `attackPower = sum(fighting skill of attackers) * (1 + 0.3 if attackerCiv.techs.includes('metallurgy') else 0)`; `defensePower = sum(fighting skill of defenders) * (1 + 0.5 if defenderSettlement.structures.wall > 0 else 0)`; the side with the higher power wins (ties favor the defender); the losing side takes `RAID_CASUALTY_MIN` (1) to `RAID_CASUALTY_MAX` (3) casualties (`ctx.rng.split('raid-casualties').int(...)`  picks the count, then that many distinct losers in ascending id order are chosen and each takes a `RAID_CASUALTY_HEALTH_HIT` (0.4) health hit, dying if health drops to 0 or below); if attackers win, they steal up to `RAID_STEAL_FRACTION` (0.3) of `defenderSettlement.stock.food`; both sides gain matching memories/grief/anger (`kind: 'defeat'`/`'victory'` per the contract, `kind: 'harmed'` for casualties) and every casualty's civ's `warWeariness` increases by `RAID_WEARINESS_PER_CASUALTY` (0.02) per own-side casualty.
 - `export interface RaidResult { attackerWon: boolean; attackerCasualties: number[]; defenderCasualties: number[]; foodStolen: number }`.
-- `export function updateWarState(ctx: ConflictCtxLike): void` — tracks raid counts between civ pairs via the extension property `_raidHistory: { otherCivId: number; timestamps: Tick[] }[]` on `Civ` (deviation 3); after `resolveRaid` records a raid timestamp for both civs against each other, if 3+ raids occurred between the same civ pair within `WAR_DECLARATION_WINDOW` (360 ticks = 1 year), both civs add each other to `atWarWith` (if not already present) and their raid counters (the timestamp list for that pair) reset; while both civs in `atWarWith` have `warWeariness > PEACE_WEARINESS_THRESHOLD` (0.7), peace is declared: both remove each other from `atWarWith`, both `warWeariness` reset to 0, and both raid counters for that pair reset.
-- Exported constants: `RAID_CHECK_INTERVAL = 15`, `RAID_AGGRESSION_THRESHOLD = 0.6`, `RAID_FOOD_THRESHOLD = 0.5`, `RAID_REVENGE_THRESHOLD = 0.5`, `RAID_TARGET_MAX_DISTANCE = 30`, `RAID_PARTY_MAX_SIZE = 8`, `RAID_WILLING_AGGRESSION = 0.4`, `RAID_WILLING_LOYALTY = 0.7`, `RAID_CASUALTY_MIN = 1`, `RAID_CASUALTY_MAX = 3`, `RAID_CASUALTY_HEALTH_HIT = 0.4`, `RAID_STEAL_FRACTION = 0.3`, `RAID_WEARINESS_PER_CASUALTY = 0.02`, `WAR_DECLARATION_WINDOW = 360`, `WAR_DECLARATION_MIN_RAIDS = 3`, `PEACE_WEARINESS_THRESHOLD = 0.7`.
+- `export function updateWarState(ctx: ConflictCtxLike): void` — tracks raid counts between civ pairs via the extension property `_raidHistory: { otherCivId: number; timestamps: Tick[] }[]` on `Civ` (deviation 3); after `resolveRaid` records a raid timestamp for both civs against each other, if 3+ raids occurred between the same civ pair within `WAR_DECLARATION_WINDOW` (360 ticks = 1 year), both civs add each other to `atWarWith` (if not already present) and their raid counters (the timestamp list for that pair) reset; while both civs in `atWarWith` have `warWeariness > PEACE_WEARINESS_THRESHOLD` (0.7), peace is declared: both remove each other from `atWarWith`, both `warWeariness` reset to 0, and both raid counters for that pair reset. `updateWarState` also calls `maybeFormAlliances(ctx)` at the end of its own run (see below), so alliance evaluation happens on the same cadence as war/peace evaluation.
+- `export function maybeFormAlliances(ctx: ConflictCtxLike): void` — spec section 6's "alliances" coverage (not in the contract's frozen `Civ` type, tracked via deviation 3's `_alliedWith: number[]` extension property on `Civ`). For every ordered pair of distinct civs (ascending id, each pair evaluated once): if the pair is NOT in `atWarWith` of either side, NOT already allied, has NO raids recorded against each other in `_raidHistory` within `ALLIANCE_LOOKBACK_WINDOW` (720 ticks), and both civs' `warWeariness < ALLIANCE_MAX_WEARINESS` (0.3, i.e. neither side is currently strained), the pair rolls `ctx.rng.split('alliance-<lowId>-<highId>-<tick>').chance(ALLIANCE_FORM_CHANCE)` (0.05 per eligible check); on success both civs add each other's id to `_alliedWith` (deduped). An alliance dissolves immediately (both sides remove each other from `_alliedWith`) the moment the pair enters `atWarWith` via `updateWarState`'s war-declaration step earlier in the same call — checked by `maybeFormAlliances` itself at the top of its loop before the eligibility checks above, so a pair can never be simultaneously allied and at war.
+- `export function isAllied(civA: Civ, civB: Civ): boolean` — `true` iff `civB.id` is present in `civA`'s `_alliedWith` (absent/`undefined` treated as `[]`); used by `nearestOtherCivSettlement` to exclude allied civs' settlements from raid targeting, so an aggressive leader never raids an ally.
+- Exported constants: `RAID_CHECK_INTERVAL = 15`, `RAID_AGGRESSION_THRESHOLD = 0.6`, `RAID_FOOD_THRESHOLD = 0.5`, `RAID_REVENGE_THRESHOLD = 0.5`, `RAID_TARGET_MAX_DISTANCE = 30`, `RAID_PARTY_MAX_SIZE = 8`, `RAID_WILLING_AGGRESSION = 0.4`, `RAID_WILLING_LOYALTY = 0.7`, `RAID_CASUALTY_MIN = 1`, `RAID_CASUALTY_MAX = 3`, `RAID_CASUALTY_HEALTH_HIT = 0.4`, `RAID_STEAL_FRACTION = 0.3`, `RAID_WEARINESS_PER_CASUALTY = 0.02`, `WAR_DECLARATION_WINDOW = 360`, `WAR_DECLARATION_MIN_RAIDS = 3`, `PEACE_WEARINESS_THRESHOLD = 0.7`, `ALLIANCE_LOOKBACK_WINDOW = 720`, `ALLIANCE_MAX_WEARINESS = 0.3`, `ALLIANCE_FORM_CHANCE = 0.05`.
 - Note on "loyalty": the contract's fighter-willingness clause says "aggression>0.4 or loyalty>0.7"; `Person` has no scalar `loyalty` field (loyalty is a `Morality` axis and also a `RelationKind`). This module reads it as `p.morality.loyalty > RAID_WILLING_LOYALTY`, the direct morality-axis interpretation, since raid willingness is a per-person trait check consistent with how `RAID_AGGRESSION_THRESHOLD` reads `traits.aggression` — both are self-properties of the candidate fighter, not relationship-derived. This is recorded as part of this task's Produces (not a contract deviation — the contract line under-specified which `loyalty` it meant, and `Person.morality.loyalty` is the only scalar field with that exact name).
 
 Wiring notes for Task 33 (binding):
 - Task 33 tick step 5 calls `updateConflict(ctx)` between `tradeBetween` and `updateTechnology`, exactly as ordered in the contract.
-- `updateWarState` is called internally by `updateConflict` at the end of its own run (after any raids this tick), not as a separate Task 33 wiring call — the contract lists conflict as a single `updateConflict(ctx)` entry point, so this task keeps `updateWarState` as an internally-invoked, separately-exported (and separately-testable) helper.
+- `updateWarState` is called internally by `updateConflict` at the end of its own run (after any raids this tick), not as a separate Task 33 wiring call — the contract lists conflict as a single `updateConflict(ctx)` entry point, so this task keeps `updateWarState` (and, transitively, `maybeFormAlliances`) as internally-invoked, separately-exported (and separately-testable) helpers.
 - `revengeMemorySum(leader)` (private helper, not exported) sums `valence` (negated, since revenge grudges are negative-valence `harmed`/`kin-died`/`defeat` memories) times `salience` over the leader's memory for entries with `otherId`'s civ being the candidate target civ; simplified here (no target civ narrowing at trigger-check time) to sum of `-valence*salience` over memory kinds `'harmed'`, `'kin-died'`, `'defeat'` clamped to `[0, 1]`, matching "revenge memory sum>0.5" from the brief without requiring foreknowledge of which civ will be targeted.
+- `isAllied` is exported for Task 34 (narration of alliance formation as a low-severity event) and any future diplomacy UI to reuse verbatim rather than reaching into the `_alliedWith` extension property directly.
 
 - [ ] **Step 1: Write the failing conflict tests**
 
@@ -2619,6 +2622,8 @@ Create `tests/engine/society/conflict.test.ts` with exactly:
 ```ts
 import { describe, expect, it } from 'vitest';
 import {
+  ALLIANCE_FORM_CHANCE,
+  ALLIANCE_MAX_WEARINESS,
   PEACE_WEARINESS_THRESHOLD,
   RAID_AGGRESSION_THRESHOLD,
   RAID_CASUALTY_HEALTH_HIT,
@@ -2631,6 +2636,8 @@ import {
   RAID_WILLING_AGGRESSION,
   WAR_DECLARATION_MIN_RAIDS,
   WAR_DECLARATION_WINDOW,
+  isAllied,
+  maybeFormAlliances,
   resolveRaid,
   updateConflict,
   updateWarState,
@@ -2872,6 +2879,80 @@ describe('updateWarState', () => {
     expect(civB.atWarWith).toContain(0);
   });
 });
+
+describe('maybeFormAlliances / isAllied', () => {
+  it('is never allied by default', () => {
+    const civA = makeTestCiv({ id: 0 });
+    const civB = makeTestCiv({ id: 1 });
+    expect(isAllied(civA, civB)).toBe(false);
+    expect(isAllied(civB, civA)).toBe(false);
+  });
+
+  it('forms an alliance between two peaceful, low-weariness, raid-free civs when the roll succeeds', () => {
+    const civA = makeTestCiv({ id: 0, warWeariness: 0 });
+    const civB = makeTestCiv({ id: 1, warWeariness: 0 });
+    const ctx = makeTestCtx({ civs: [civA, civB], tick: 0 });
+
+    // Run many ticks to make an ALLIANCE_FORM_CHANCE=0.05 roll overwhelmingly likely at least once.
+    for (let t = 0; t < 500 && !isAllied(civA, civB); t++) {
+      ctx.tick = t;
+      maybeFormAlliances(ctx);
+    }
+
+    expect(isAllied(civA, civB)).toBe(true);
+    expect(isAllied(civB, civA)).toBe(true);
+    expect(ALLIANCE_FORM_CHANCE).toBe(0.05);
+  });
+
+  it('does not ally civs that are at war with each other (no-op boundary)', () => {
+    const civA = makeTestCiv({ id: 0, atWarWith: [1], warWeariness: 0 });
+    const civB = makeTestCiv({ id: 1, atWarWith: [0], warWeariness: 0 });
+    const ctx = makeTestCtx({ civs: [civA, civB], tick: 0 });
+
+    for (let t = 0; t < 500; t++) {
+      ctx.tick = t;
+      maybeFormAlliances(ctx);
+    }
+
+    expect(isAllied(civA, civB)).toBe(false);
+  });
+
+  it('does not ally civs whose weariness is at or above ALLIANCE_MAX_WEARINESS (no-op boundary)', () => {
+    const civA = makeTestCiv({ id: 0, warWeariness: ALLIANCE_MAX_WEARINESS });
+    const civB = makeTestCiv({ id: 1, warWeariness: 0 });
+    const ctx = makeTestCtx({ civs: [civA, civB], tick: 0 });
+
+    for (let t = 0; t < 500; t++) {
+      ctx.tick = t;
+      maybeFormAlliances(ctx);
+    }
+
+    expect(isAllied(civA, civB)).toBe(false);
+  });
+
+  it('war declaration dissolves a standing alliance between the pair', () => {
+    const civA = makeTestCiv({ id: 0, warWeariness: 0 });
+    const civB = makeTestCiv({ id: 1, warWeariness: 0 });
+    const ctx = makeTestCtx({ civs: [civA, civB], tick: 0 });
+    for (let t = 0; t < 500 && !isAllied(civA, civB); t++) {
+      ctx.tick = t;
+      maybeFormAlliances(ctx);
+    }
+    expect(isAllied(civA, civB)).toBe(true);
+
+    const extA = civA as typeof civA & { _raidHistory: { otherCivId: number; timestamps: number[] }[] };
+    extA._raidHistory = [{ otherCivId: 1, timestamps: [1000, 1100, 1200] }];
+    const extB = civB as typeof civB & { _raidHistory: { otherCivId: number; timestamps: number[] }[] };
+    extB._raidHistory = [{ otherCivId: 0, timestamps: [1000, 1100, 1200] }];
+    ctx.tick = 1250;
+
+    updateWarState(ctx);
+
+    expect(civA.atWarWith).toContain(1);
+    expect(isAllied(civA, civB)).toBe(false);
+    expect(isAllied(civB, civA)).toBe(false);
+  });
+});
 ```
 
 - [ ] **Step 2: Run the tests and confirm they fail**
@@ -2921,9 +3002,23 @@ export const RAID_WEARINESS_PER_CASUALTY = 0.02;
 export const WAR_DECLARATION_WINDOW = 360; // 1 year at YEAR_TICKS = 360
 export const WAR_DECLARATION_MIN_RAIDS = 3;
 export const PEACE_WEARINESS_THRESHOLD = 0.7;
+export const ALLIANCE_LOOKBACK_WINDOW = 720; // 2 years at YEAR_TICKS = 360
+export const ALLIANCE_MAX_WEARINESS = 0.3;
+export const ALLIANCE_FORM_CHANCE = 0.05;
 
 interface WithRaidHistory {
   _raidHistory?: { otherCivId: number; timestamps: Tick[] }[];
+}
+
+/** Deviation 3: alliance membership tracked outside the frozen Civ contract type. */
+interface WithAlliance {
+  _alliedWith?: number[];
+}
+
+/** True iff civB.id is present in civA's alliance list (absent treated as empty). */
+export function isAllied(civA: Civ, civB: Civ): boolean {
+  const ext = civA as Civ & WithAlliance;
+  return (ext._alliedWith ?? []).includes(civB.id);
 }
 
 function foodPerCapita(s: Settlement): number {
@@ -2945,10 +3040,15 @@ function nearestOtherCivSettlement(
   from: Settlement,
   ctx: ConflictCtxLike,
 ): Settlement | null {
+  const fromCiv = ctx.civs.find((c) => c.id === from.civId);
   let best: Settlement | null = null;
   let bestDist = Infinity;
-  for (const s of [...ctx.settlements].sort((a, b) => a.id - b)) {
+  for (const s of [...ctx.settlements].sort((a, b) => a.id - b.id)) {
     if (s.civId === from.civId) continue;
+    if (fromCiv !== undefined) {
+      const targetCiv = ctx.civs.find((c) => c.id === s.civId);
+      if (targetCiv !== undefined && isAllied(fromCiv, targetCiv)) continue; // never raid an ally
+    }
     const d = dist(from.center, s.center);
     if (d > RAID_TARGET_MAX_DISTANCE) continue;
     if (d < bestDist) {
@@ -2983,7 +3083,7 @@ export function resolveRaid(
     (defenderSettlement.structures.wall > 0 ? 1.5 : 1);
 
   const attackerWon = attackPower > defensePower;
-  const losers = (attackerWon ? defenders : attackers).slice().sort((a, b) => a.id - b);
+  const losers = (attackerWon ? defenders : attackers).slice().sort((a, b) => a.id - b.id);
   const loserCiv = attackerWon ? defenderCiv : attackerCiv;
 
   const casualtyRoll = ctx.rng.split(`raid-casualties-${ctx.tick}-${defenderSettlement.id}`);
@@ -3071,7 +3171,7 @@ function recordRaid(attackerCiv: Civ, defenderCiv: Civ, tick: Tick): void {
 export function updateConflict(ctx: ConflictCtxLike): void {
   if (ctx.tick % RAID_CHECK_INTERVAL !== 0) return;
 
-  for (const s of [...ctx.settlements].sort((a, b) => a.id - b)) {
+  for (const s of [...ctx.settlements].sort((a, b) => a.id - b.id)) {
     const leader = leaderOf(s, ctx);
     if (leader === null) continue;
     if (leader.traits.aggression <= RAID_AGGRESSION_THRESHOLD) continue;
@@ -3119,7 +3219,7 @@ export function updateConflict(ctx: ConflictCtxLike): void {
  * that pair.
  */
 export function updateWarState(ctx: ConflictCtxLike): void {
-  const civs = [...ctx.civs].sort((a, b) => a.id - b);
+  const civs = [...ctx.civs].sort((a, b) => a.id - b.id);
   for (const civ of civs) {
     const ext = civ as Civ & WithRaidHistory;
     if (ext._raidHistory === undefined) continue;
@@ -3136,6 +3236,14 @@ export function updateWarState(ctx: ConflictCtxLike): void {
         const otherExt = other as (Civ & WithRaidHistory) | undefined;
         const otherEntry = otherExt?._raidHistory?.find((e) => e.otherCivId === civ.id);
         if (otherEntry !== undefined) otherEntry.timestamps = [];
+
+        // Declaring war immediately dissolves any standing alliance between the pair.
+        const civAlliance = civ as Civ & WithAlliance;
+        civAlliance._alliedWith = (civAlliance._alliedWith ?? []).filter((id) => id !== entry.otherCivId);
+        if (other !== undefined) {
+          const otherAlliance = other as Civ & WithAlliance;
+          otherAlliance._alliedWith = (otherAlliance._alliedWith ?? []).filter((id) => id !== civ.id);
+        }
       }
     }
   }
@@ -3153,6 +3261,45 @@ export function updateWarState(ctx: ConflictCtxLike): void {
       }
     }
   }
+
+  maybeFormAlliances(ctx);
+}
+
+/**
+ * Spec section 6 "alliances" coverage: for every distinct civ pair (ascending
+ * id, each pair evaluated once) that is not at war, not already allied, has
+ * no raids against each other within ALLIANCE_LOOKBACK_WINDOW, and both
+ * sides have warWeariness below ALLIANCE_MAX_WEARINESS, roll
+ * ALLIANCE_FORM_CHANCE per tick this function runs; on success both civs add
+ * each other to their _alliedWith list (deviation 3 extension property).
+ */
+export function maybeFormAlliances(ctx: ConflictCtxLike): void {
+  const civs = [...ctx.civs].sort((a, b) => a.id - b.id);
+  for (const civA of civs) {
+    for (const civB of civs) {
+      if (civB.id <= civA.id) continue; // each unordered pair once, lower id drives it
+
+      if (civA.atWarWith.includes(civB.id) || civB.atWarWith.includes(civA.id)) continue;
+      if (isAllied(civA, civB) || isAllied(civB, civA)) continue;
+
+      const historyA = (civA as Civ & WithRaidHistory)._raidHistory?.find((e) => e.otherCivId === civB.id);
+      const historyB = (civB as Civ & WithRaidHistory)._raidHistory?.find((e) => e.otherCivId === civA.id);
+      const recentRaid =
+        (historyA?.timestamps.some((t) => ctx.tick - t <= ALLIANCE_LOOKBACK_WINDOW) ?? false) ||
+        (historyB?.timestamps.some((t) => ctx.tick - t <= ALLIANCE_LOOKBACK_WINDOW) ?? false);
+      if (recentRaid) continue;
+
+      if (civA.warWeariness >= ALLIANCE_MAX_WEARINESS || civB.warWeariness >= ALLIANCE_MAX_WEARINESS) continue;
+
+      const roll = ctx.rng.split(`alliance-${civA.id}-${civB.id}-${ctx.tick}`);
+      if (!roll.chance(ALLIANCE_FORM_CHANCE)) continue;
+
+      const extA = civA as Civ & WithAlliance;
+      const extB = civB as Civ & WithAlliance;
+      extA._alliedWith = [...(extA._alliedWith ?? []), civB.id].filter((id, i, arr) => arr.indexOf(id) === i);
+      extB._alliedWith = [...(extB._alliedWith ?? []), civA.id].filter((id, i, arr) => arr.indexOf(id) === i);
+    }
+  }
 }
 ```
 
@@ -3167,10 +3314,10 @@ npx vitest run tests/engine/society/conflict.test.ts
 Expected: PASS —
 
 ```
- ✓ tests/engine/society/conflict.test.ts (11 tests)
+ ✓ tests/engine/society/conflict.test.ts (16 tests)
 
  Test Files  1 passed (1)
-      Tests  11 passed (11)
+      Tests  16 passed (16)
 ```
 
 - [ ] **Step 5: Typecheck**

@@ -16,6 +16,7 @@ This section assembles every engine module built in Sections 1-6 into a runnable
 10. **`checkInvariants` additionally treats a NaN/Infinite `rng` internal state as impossible to observe from the public `Rng` interface**, so "no NaN/Inf in any person field" is implemented by walking every numeric leaf of every alive `Person` (traits, emotions, morality, needs, skills, health, influence, inventory, memory valence/salience, relationship affinity) plus every `Civ.knowledge` value — exactly the fields the contract enumerates, made concrete.
 11. **`takeSnapshot`'s territory ownership** ("nearest-settlement-within-20-tiles") is computed by scanning every tile once and, for tiles within 20 (inclusive) euclidean tiles of at least one settlement center, assigning the civId of the nearest such settlement (ties broken by lowest settlement id); tiles with no settlement within 20 tiles get `-1`. This is a concrete instantiation of the contract's one-line spec, not a deviation from it.
 12. **`worker.ts`'s `handleMessage` is a pure function** `(state: WorkerState, msg: UiToWorker) => { state: WorkerState; replies: WorkerToUi[] }` (per the section brief) — this is additive: the contract only specifies the wire protocol and that `worker.ts` wires it to `Simulation`, not the internal factoring. `WorkerState` and `handleMessage` are new exports this task defines and are listed under **Produces**.
+13. **Every `narrate*`/`pushEvent` call site is wired directly into `Simulation.tick()` in Task 33**, not deferred to any later task. Every society/lifecycle module in this plan (`lifecycle.ts`, `settlements.ts`, `influence.ts`, `economy.ts`, `conflict.ts`, `technology.ts`, `religion.ts`) returns `void` and signals state changes purely through mutation, per the contract's own signatures. `Simulation.tick()` therefore snapshots the relevant piece of state immediately before each module call and diffs it immediately after, in the same phase, to detect and narrate: births and deaths (roster-length and alive-flag diff around `updateLifecycle`), settlement founded/dissolved (id-set diff around `updateSettlements`), leader emerged (`leaderOf(s, ctx)` diff around `updateInfluence`), famine (`stock.food` depletion diff around `shareWithin`/`tradeBetween`), war declared/peace (`civ.atWarWith` diff around `updateConflict`) and raids (freshly-recorded `'victory'`/`'defeat'` memory entries stamped with the current tick, per the contract's own conflict.ts comment: "casualties, stolen stock, memories/grief/anger both sides"), tech unlocked/lost (`civ.techs` array diff around `updateTechnology`, matching the contract's own parenthetical "inactive = 'lost' (event)"), religion founded (id-set diff on `ctx.religions` around `maybeFoundReligion`), and disasters (newly-started `NaturalEvent`s, `startTick === ctx.tick`, narrated at the top of the world phase). This closes the gap the contract's Section 4 dataflow diagram implies (`events.ts` narration templates exist to be called from somewhere) without changing any consumed module's signature.
 
 ### Task 33: Simulation class, EngineCtx, and tick orchestration (`src/engine/sim/simulation.ts` + `src/engine/sim/invariants.ts`)
 
@@ -45,12 +46,13 @@ Consumes:
 - From `src/engine/agents/decide.ts` (Task 19): `chooseAction(p, perception, brain: BrainLike, rng): Action`
 - From `src/engine/brains/registry.ts` (Task 20): `getBrain(lineage): Brain`
 - From `src/engine/society/settlements.ts` (Task 26): `updateSettlements(ctx: SettlementsCtxLike): void`
-- From `src/engine/society/influence.ts` (Task 27): `updateInfluence(ctx: InfluenceCtxLike): void`
+- From `src/engine/society/influence.ts` (Task 27): `updateInfluence(ctx: InfluenceCtxLike): void`, `leaderOf(s: Settlement, ctx: EngineCtx): Person | null`
 - From `src/engine/society/culture.ts` (Task 28): `maybeSchism(ctx: CultureCtxLike): void`
 - From `src/engine/society/technology.ts` (Task 29): `updateTechnology(ctx: TechnologyCtxLike): void`, `addKnowledge(civ, domain, points): void`, `techYieldMultiplier(civ, action): number`
 - From `src/engine/society/religion.ts` (Task 30): `maybeFoundReligion(ctx: ReligionCtxLike): void`, `spreadBeliefs(ctx: ReligionCtxLikeExtended): void`, `DisasterWitnessEvent`
 - From `src/engine/society/economy.ts` (Task 31): `shareWithin(ctx: EconomyCtxLike): void`, `tradeBetween(ctx: EconomyCtxLike): void`
 - From `src/engine/society/conflict.ts` (Task 32): `updateConflict(ctx: ConflictCtxLike): void`
+- From `src/engine/sim/events.ts` (Task 34, written first — see Step 1 below): `pushEvent`, `NarrativeEvent`, `narrateBirth`, `narrateDeath`, `narrateSettlementFounded`, `narrateSettlementDissolved`, `narrateLeaderEmerged`, `narrateTechUnlocked`, `narrateTechLost`, `narrateReligionFounded`, `narrateRaid`, `narrateWarDeclared`, `narratePeace`, `narrateFamine`, `narrateDisaster` — every one of these is called directly inside `Simulation.tick()` (see deviation 13); only `narrateSchism`/`narrateExtinction` are hand-inlined as string literals in this task's own `tick()`/`checkExtinction()` rather than imported, since those two are one-call-site each.
 - Tests also use `makeNameGenerator`, `createRng`, `generateWorld`, `createPerson` (Task 8), `makeTestBrain` (Task 19, `tests/helpers/testBrain.ts`)
 
 Produces:
@@ -260,6 +262,73 @@ describe('Simulation — dead people retained in people[] but skipped', () => {
     }
   });
 });
+
+describe('Simulation — narration wiring (Task 33 wires every narrate*/pushEvent call site itself)', () => {
+  it('emits at least one death event over 400 ticks of a 200-person run (deaths are inevitable at this horizon)', () => {
+    const sim = new Simulation(baseConfig({ startPopulation: 200 }));
+    for (let i = 0; i < 400; i++) sim.tick();
+    const deaths = sim.ctx.events.filter((e) => e.kind === 'death');
+    expect(deaths.length).toBeGreaterThan(0);
+    expect(deaths[0]?.text.length).toBeGreaterThan(0);
+    expect(sim.ctx.counters).toBeDefined();
+  });
+
+  it('emits at least one birth event over 400 ticks of a 200-person run', () => {
+    const sim = new Simulation(baseConfig({ startPopulation: 200 }));
+    for (let i = 0; i < 400; i++) sim.tick();
+    const births = sim.ctx.events.filter((e) => e.kind === 'birth');
+    expect(births.length).toBeGreaterThan(0);
+  });
+
+  it('emits a settlement-founded event the tick a new settlement first appears in ctx.settlements', () => {
+    const sim = new Simulation(baseConfig({ startPopulation: 200 }));
+    let foundedTick: number | null = null;
+    for (let i = 0; i < 1000 && foundedTick === null; i++) {
+      const before = sim.ctx.settlements.length;
+      sim.tick();
+      if (sim.ctx.settlements.length > before) foundedTick = sim.ctx.tick;
+    }
+    expect(foundedTick).not.toBeNull();
+    const founded = sim.ctx.events.filter((e) => e.kind === 'settlement-founded');
+    expect(founded.some((e) => e.tick === foundedTick)).toBe(true);
+  });
+
+  it('emits a tech-unlocked event the tick civ.techs first gains an entry', () => {
+    const sim = new Simulation(baseConfig({ startPopulation: 200, mode: 'civs' }));
+    let unlockedTick: number | null = null;
+    for (let i = 0; i < 2000 && unlockedTick === null; i++) {
+      const before = sim.ctx.civs.reduce((n, c) => n + c.techs.length, 0);
+      sim.tick();
+      const after = sim.ctx.civs.reduce((n, c) => n + c.techs.length, 0);
+      if (after > before) unlockedTick = sim.ctx.tick;
+    }
+    expect(unlockedTick).not.toBeNull();
+    const unlocked = sim.ctx.events.filter((e) => e.kind === 'tech-unlocked');
+    expect(unlocked.some((e) => e.tick === unlockedTick)).toBe(true);
+  });
+
+  it('emits a disaster event (drought/harsh-winter/disease) the tick a NaturalEvent first starts', () => {
+    const sim = new Simulation(baseConfig({ startPopulation: 200 }));
+    let startedTick: number | null = null;
+    let startedKind: string | null = null;
+    for (let i = 0; i < 1000 && startedTick === null; i++) {
+      sim.tick();
+      const fresh = sim.ctx.naturalEvents.find((e) => e.startTick === sim.ctx.tick);
+      if (fresh !== undefined) {
+        startedTick = sim.ctx.tick;
+        startedKind = fresh.kind;
+      }
+    }
+    expect(startedTick).not.toBeNull();
+    const disasterEvents = sim.ctx.events.filter((e) => e.kind === startedKind);
+    expect(disasterEvents.some((e) => e.tick === startedTick)).toBe(true);
+  });
+
+  it('never emits birth/death/settlement/tech/religion/raid/war/famine/disaster events before Simulation.tick() has run at least once', () => {
+    const sim = new Simulation(baseConfig({ startPopulation: 200 }));
+    expect(sim.ctx.events).toEqual([]);
+  });
+});
 ```
 
 - [ ] **Step 3: Run the tests and confirm they fail**
@@ -305,7 +374,7 @@ import { reinforce, maybeImitate, type LearningCtx } from '../agents/learning';
 import { chooseAction } from '../agents/decide';
 import { getBrain } from '../brains/registry';
 import { updateSettlements, type SettlementsCtxLike } from '../society/settlements';
-import { updateInfluence, type InfluenceCtxLike } from '../society/influence';
+import { updateInfluence, leaderOf, type InfluenceCtxLike } from '../society/influence';
 import { maybeSchism, type CultureCtxLike } from '../society/culture';
 import { updateTechnology, addKnowledge, techYieldMultiplier, type TechnologyCtxLike } from '../society/technology';
 import {
@@ -317,7 +386,23 @@ import {
 } from '../society/religion';
 import { shareWithin, tradeBetween, type EconomyCtxLike } from '../society/economy';
 import { updateConflict, type ConflictCtxLike } from '../society/conflict';
-import { pushEvent, type NarrativeEvent } from './events';
+import {
+  pushEvent,
+  narrateBirth,
+  narrateDeath,
+  narrateSettlementFounded,
+  narrateSettlementDissolved,
+  narrateLeaderEmerged,
+  narrateTechUnlocked,
+  narrateTechLost,
+  narrateReligionFounded,
+  narrateRaid,
+  narrateWarDeclared,
+  narratePeace,
+  narrateFamine,
+  narrateDisaster,
+  type NarrativeEvent,
+} from './events';
 import { checkInvariants } from './invariants';
 
 /**
@@ -458,9 +543,19 @@ export class Simulation {
     ctx.counters.deaths = 0;
 
     // Phase: world (step 1) — natural events first, so this tick's regrowth
-    // sees this tick's droughts.
+    // sees this tick's droughts. Newly-started NaturalEvents this tick also
+    // become disaster narration (drought/harsh-winter/disease); severity 2
+    // (regional, not yet civ-ending). `makeDisasterWitnessEvents` (used later,
+    // by religion) reads these back out of ctx.events, so this must run
+    // before the religion phase.
     ctx.naturalEvents = updateNaturalEvents(ctx.naturalEvents, ctx.world, ctx.tick, ctx.rng.split(`events-${ctx.tick}`));
     regenerateResources(ctx.world, ctx.tick, ctx.rng.split(`regrowth-${ctx.tick}`), ctx.naturalEvents);
+    for (const ev of ctx.naturalEvents) {
+      if (ev.startTick !== ctx.tick) continue;
+      const regionDescription =
+        ev.center !== null ? `the region near (${ev.center.x}, ${ev.center.y})` : 'the land';
+      pushEvent(ctx, ev.kind, 2, null, narrateDisaster(ev.kind, regionDescription));
+    }
     emit(ctx, 'world');
 
     // Phase: spatial (step 2).
@@ -489,6 +584,13 @@ export class Simulation {
     emit(ctx, 'people');
 
     // Phase: lifecycle (step 4) — all people, ascending id (dead skipped internally).
+    // Births/deaths are narrated here via straightforward before/after diffs:
+    // updateLifecycle appends new Person objects to ctx.people for births
+    // (contract: "birth when pregnantUntil reached (uses createChild...)")
+    // and flips `alive` false + sets `causeOfDeath` for deaths — both are
+    // observable without any change to lifecycle.ts's void return type.
+    const rosterCountBefore = ctx.people.length;
+    const aliveIdsBefore = new Set(ctx.people.filter((p) => p.alive).map((p) => p.id));
     const lifecycleCtx: LifecycleCtx = ctx;
     for (const p of [...ctx.people].sort((a, b) => a.id - b.id)) {
       updateLifecycle(p, lifecycleCtx, (child, rng) => getBrain(child.lineage).init(child, rng));
@@ -496,35 +598,149 @@ export class Simulation {
     for (const p of ctx.people) {
       if (!ctx.personById.has(p.id)) ctx.personById.set(p.id, p);
     }
+    // Births: every person appended to ctx.people during this phase.
+    for (let i = rosterCountBefore; i < ctx.people.length; i++) {
+      const child = ctx.people[i];
+      if (child === undefined || child.parentIds === null) continue;
+      ctx.counters.births += 1;
+      const mother = ctx.personById.get(child.parentIds[0]);
+      const father = ctx.personById.get(child.parentIds[1]);
+      pushEvent(
+        ctx,
+        'birth',
+        1,
+        child.civId,
+        narrateBirth(child.name, mother?.name ?? 'someone', father?.name ?? 'someone'),
+      );
+    }
+    // Deaths: every previously-alive person now alive=false.
+    for (const p of ctx.people) {
+      if (!aliveIdsBefore.has(p.id)) continue;
+      if (p.alive) continue;
+      ctx.counters.deaths += 1;
+      pushEvent(ctx, 'death', p.causeOfDeath === 'old-age' ? 1 : 2, p.civId, narrateDeath(p.name, p.causeOfDeath ?? 'unknown causes'));
+    }
     emit(ctx, 'lifecycle');
 
-    // Phase: settlements (step 5a).
+    // Phase: settlements (step 5a). Founded/dissolved narrated via an id-set
+    // diff (updateSettlements mutates ctx.settlements in place per the
+    // contract: "form ... assign members, dissolve (<3)").
+    const settlementsBefore = new Map(ctx.settlements.map((s) => [s.id, s.name] as const));
     const settlementsCtx: SettlementsCtxLike = ctx;
     updateSettlements(settlementsCtx);
+    const settlementIdsAfter = new Set(ctx.settlements.map((s) => s.id));
+    for (const s of ctx.settlements) {
+      if (settlementsBefore.has(s.id)) continue;
+      const civ = ctx.civs.find((c) => c.id === s.civId);
+      pushEvent(ctx, 'settlement-founded', 2, s.civId, narrateSettlementFounded(s.name, civ?.name ?? 'an unknown people'));
+    }
+    for (const [id, name] of settlementsBefore) {
+      if (settlementIdsAfter.has(id)) continue;
+      pushEvent(ctx, 'settlement-dissolved', 2, null, narrateSettlementDissolved(name));
+    }
     emit(ctx, 'settlements');
 
-    // Phase: influence (step 5b).
+    // Phase: influence (step 5b). Leader-emerged narrated via a per-settlement
+    // leaderOf(...) diff (contract: "leader of settlement = max influence
+    // member"); a settlement gaining a leader where it had none, or changing
+    // to a different person, counts as an emergence.
+    const leaderIdsBefore = new Map<number, number | null>();
+    for (const s of ctx.settlements) leaderIdsBefore.set(s.id, leaderOf(s, ctx)?.id ?? null);
     const influenceCtx: InfluenceCtxLike = ctx;
     updateInfluence(influenceCtx);
+    for (const s of ctx.settlements) {
+      const before = leaderIdsBefore.get(s.id) ?? null;
+      const after = leaderOf(s, ctx)?.id ?? null;
+      if (after === null || after === before) continue;
+      const leader = ctx.personById.get(after);
+      if (leader === undefined) continue;
+      pushEvent(ctx, 'leader-emerged', 1, s.civId, narrateLeaderEmerged(leader.name, s.name));
+    }
     emit(ctx, 'influence');
 
     // Phase: economy (step 5c) — shareWithin then tradeBetween, as ordered.
+    // Famine narrated via a per-settlement stock.food transition to
+    // depleted (>0 before economy resolves this tick's draws, 0 after) while
+    // the settlement still has members — economy.ts is where hungry members
+    // draw down stock (contract: "draw when hungry"), making this phase the
+    // correct place to observe the transition.
+    const hadFoodBefore = new Map<number, boolean>();
+    for (const s of ctx.settlements) hadFoodBefore.set(s.id, s.stock.food > 0);
     const economyCtx: EconomyCtxLike = ctx;
     shareWithin(economyCtx);
     tradeBetween(economyCtx);
+    for (const s of ctx.settlements) {
+      if (s.memberIds.length === 0) continue;
+      const had = hadFoodBefore.get(s.id) ?? false;
+      if (had && s.stock.food <= 0) {
+        pushEvent(ctx, 'famine', 2, s.civId, narrateFamine(s.name));
+      }
+    }
     emit(ctx, 'economy');
 
-    // Phase: conflict (step 5d).
+    // Phase: conflict (step 5d). War declared/peace narrated via a per-civ
+    // atWarWith diff; raids narrated via freshly-recorded 'victory'/'defeat'
+    // memories (contract conflict.ts note: "casualties, stolen stock,
+    // memories/grief/anger both sides") on attacker/defender settlement
+    // leaders — updateConflict itself returns void, so both signals are read
+    // back from the state it is documented to mutate.
+    const atWarBefore = new Map<number, Set<number>>();
+    for (const civ of ctx.civs) atWarBefore.set(civ.id, new Set(civ.atWarWith));
     const conflictCtx: ConflictCtxLike = ctx;
     updateConflict(conflictCtx);
+    for (const civ of ctx.civs) {
+      const before = atWarBefore.get(civ.id) ?? new Set<number>();
+      for (const otherId of civ.atWarWith) {
+        if (before.has(otherId) || otherId < civ.id) continue; // narrate each pair once, lower id first
+        const other = ctx.civs.find((c) => c.id === otherId);
+        pushEvent(ctx, 'war-declared', 3, civ.id, narrateWarDeclared(civ.name, other?.name ?? 'an unknown people'));
+      }
+      for (const otherId of before) {
+        if (civ.atWarWith.includes(otherId) || otherId < civ.id) continue;
+        const other = ctx.civs.find((c) => c.id === otherId);
+        pushEvent(ctx, 'peace', 2, civ.id, narratePeace(civ.name, other?.name ?? 'an unknown people'));
+      }
+    }
+    for (const p of ctx.people) {
+      const latest = p.memory[0];
+      if (latest === undefined || latest.tick !== ctx.tick) continue;
+      if (latest.kind !== 'victory' && latest.kind !== 'defeat') continue;
+      const settlement = ctx.settlements.find((s) => s.id === p.settlementId);
+      const attackerWon = latest.kind === 'victory';
+      const attackerCiv = ctx.civs.find((c) => c.id === p.civId);
+      pushEvent(
+        ctx,
+        'raid',
+        2,
+        p.civId,
+        narrateRaid(attackerCiv?.name ?? 'Raiders', settlement?.name ?? 'a nearby settlement', attackerWon),
+      );
+    }
     emit(ctx, 'conflict');
 
-    // Phase: technology (step 5e).
+    // Phase: technology (step 5e). Unlocked/lost narrated via a per-civ
+    // civ.techs array diff (contract: "unlock at TECH_THRESHOLDS ... inactive
+    // = 'lost' (event)" — the parenthetical "(event)" names this exact
+    // narration point).
+    const techsBefore = new Map<number, Set<string>>();
+    for (const civ of ctx.civs) techsBefore.set(civ.id, new Set(civ.techs));
     const technologyCtx: TechnologyCtxLike = ctx;
     updateTechnology(technologyCtx);
+    for (const civ of ctx.civs) {
+      const before = techsBefore.get(civ.id) ?? new Set<string>();
+      for (const techId of civ.techs) {
+        if (!before.has(techId)) pushEvent(ctx, 'tech-unlocked', 2, civ.id, narrateTechUnlocked(techId, civ.name));
+      }
+      for (const techId of before) {
+        if (!civ.techs.includes(techId as (typeof civ.techs)[number])) {
+          pushEvent(ctx, 'tech-lost', 2, civ.id, narrateTechLost(techId, civ.name));
+        }
+      }
+    }
     emit(ctx, 'technology');
 
-    // Phase: religion (step 5f) — spreadBeliefs then maybeFoundReligion, as ordered.
+    // Phase: religion (step 5f) — spreadBeliefs then maybeFoundReligion, as
+    // ordered. Religion founded narrated via an id-set diff on ctx.religions.
     const recentDisasterEvents = makeDisasterWitnessEvents(ctx.events, ctx.tick, RELIGION_EVENT_WINDOW);
     const religionCtxExtended: ReligionCtxLikeExtended = {
       people: ctx.people,
@@ -539,7 +755,20 @@ export class Simulation {
     };
     spreadBeliefs(religionCtxExtended);
     const religionCtx: ReligionCtxLike = religionCtxExtended;
+    const religionIdsBefore = new Set(ctx.religions.map((r) => r.id));
     maybeFoundReligion(religionCtx);
+    for (const r of ctx.religions) {
+      if (religionIdsBefore.has(r.id)) continue;
+      const founder = ctx.personById.get(r.founderId);
+      const civ = ctx.civs.find((c) => c.id === r.civId);
+      pushEvent(
+        ctx,
+        'religion-founded',
+        2,
+        r.civId,
+        narrateReligionFounded(r.name, founder?.name ?? 'a nameless prophet', civ?.name ?? 'an unknown people'),
+      );
+    }
     emit(ctx, 'religion');
 
     // Phase: schism (step 5g) — last among the society calls.
@@ -627,10 +856,10 @@ npx vitest run tests/engine/sim/simulation.test.ts
 Expected: PASS —
 
 ```
- ✓ tests/engine/sim/simulation.test.ts (12 tests)
+ ✓ tests/engine/sim/simulation.test.ts (20 tests)
 
  Test Files  1 passed (1)
-      Tests  12 passed (12)
+      Tests  20 passed (20)
 ```
 
 If the extinction-event test or the 100-tick determinism test fails because `fadeMemoriesOf` duplicates `agents/memory.ts`'s `fadeMemories` behavior incorrectly, replace the local `fadeMemoriesOf` function body with a direct call to the real `fadeMemories` from `../agents/memory` (import it) — the inline copy above is intentionally identical to Task 12's `fadeMemories` (multiply salience by 0.999, drop below 0.05) so this substitution never changes behavior; prefer the import for maintainability:
@@ -924,7 +1153,7 @@ npx vitest run tests/engine/sim/simulation.test.ts tests/engine/sim/invariants.t
 npm run typecheck
 ```
 
-Expected: both test files pass (12 + 13 = 25 tests), `npm run typecheck` exits 0 with no errors.
+Expected: both test files pass (20 + 13 = 33 tests), `npm run typecheck` exits 0 with no errors.
 
 - [ ] **Step 11: Commit**
 
@@ -954,7 +1183,7 @@ Produces:
 - One narrate helper per event kind, each returning the human-readable `text` string (never pushing itself — callers pass the result to `pushEvent`, keeping this module pure and trivially testable): `narrateBirth(childName: string, motherName: string, fatherName: string): string`, `narrateDeath(personName: string, cause: string): string`, `narrateSettlementFounded(settlementName: string, civName: string): string`, `narrateSettlementDissolved(settlementName: string): string`, `narrateLeaderEmerged(personName: string, settlementName: string): string`, `narrateTechUnlocked(techId: string, civName: string): string`, `narrateTechLost(techId: string, civName: string): string`, `narrateReligionFounded(religionName: string, founderName: string, civName: string): string`, `narrateRaid(attackerCivName: string, defenderSettlementName: string, attackerWon: boolean): string`, `narrateWarDeclared(civAName: string, civBName: string): string`, `narratePeace(civAName: string, civBName: string): string`, `narrateSchism(settlementName: string, newCivName: string, oldCivName: string): string`, `narrateFamine(settlementName: string): string`, `narrateDisaster(kind: 'drought' | 'harsh-winter' | 'disease', regionDescription: string): string`, `narrateExtinction(): string`.
 
 Wiring notes for Task 33 (binding, already applied above):
-- `Simulation` calls `pushEvent(this.ctx, 'schism', 3, newCiv.id, narrateSchism(...))`-style calls at every point in `tick()` where a society module signals a state change worth narrating. Task 33's own implementation above wires `'schism'` and `'extinction'` directly since those are detectable from `Simulation`'s own bookkeeping (civ-count delta, population-zero edge). Births/deaths/settlement/tech/religion/raid/war/famine/disaster narration are produced by later balance/integration work (Task 45) reading `ctx.counters`, settlement/tech/religion diffs, and `ctx.naturalEvents` each tick and calling the matching `narrate*` helper — this task defines and unit-tests every helper completely; wiring every single call site into `Simulation.tick()` beyond schism/extinction is explicitly out of scope for Task 33 (which already satisfies its own test suite) and does not block any later task, since every consumer of `ctx.events` (Task 35's `takeSnapshot`, the UI event feed) only reads whatever is present.
+- `Simulation` calls `pushEvent(this.ctx, kind, severity, civId, narrate*(...))`-style calls at every point in `tick()` where a society or lifecycle module signals a state change worth narrating. Task 33's own implementation wires all fifteen kinds directly: `'schism'` and `'extinction'` are detected from `Simulation`'s own bookkeeping (civ-count delta, population-zero edge), and `'birth'`, `'death'`, `'settlement-founded'`, `'settlement-dissolved'`, `'leader-emerged'`, `'famine'`, `'war-declared'`, `'peace'`, `'raid'`, `'tech-unlocked'`, `'tech-lost'`, `'religion-founded'`, and the three `NaturalEvent`-derived disaster kinds (`'drought'`, `'harsh-winter'`, `'disease'`) are each detected via a before/after diff of the exact state the corresponding module is documented to mutate (see this section's deviation 13 for the full mapping). This task defines and unit-tests every helper completely, and Task 33 is the only task that calls any of them — no narration wiring is deferred to Task 45 or any other later task. Every consumer of `ctx.events` (Task 35's `takeSnapshot`, the UI event feed in Task 43) reads a feed that reflects all fifteen event kinds from the moment Task 33 lands.
 
 - [ ] **Step 1: Write the failing events tests**
 
