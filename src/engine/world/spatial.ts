@@ -1,5 +1,6 @@
 import { dist } from '../../shared/types';
 import type { Person, Vec2 } from '../../shared/types';
+import type { World } from './terrain';
 
 /** Grid bucket edge length in tiles. */
 export const SPATIAL_CELL_SIZE = 8;
@@ -57,4 +58,36 @@ export class SpatialIndex {
     ids.sort((a, b) => a - b);
     return ids;
   }
+}
+
+/**
+ * One-tile 8-directional step from `from` toward `to`. Candidates are tried
+ * in a fixed deterministic order: the direct (possibly diagonal) direction
+ * first, then sidesteps. Never returns a water or out-of-bounds tile;
+ * returns a copy of `from` when fully blocked or already at the target.
+ *
+ * NOTE (recorded contract deviation): the contract listed
+ * stepToward(from, to) but water avoidance requires terrain access, so
+ * `world` is a required third parameter. Callers pass ctx.world.
+ */
+export function stepToward(from: Vec2, to: Vec2, world: World): Vec2 {
+  const dx = Math.sign(to.x - from.x);
+  const dy = Math.sign(to.y - from.y);
+  if (dx === 0 && dy === 0) return { x: from.x, y: from.y };
+  let offsets: [number, number][];
+  if (dx !== 0 && dy !== 0) {
+    offsets = [[dx, dy], [dx, 0], [0, dy]];
+  } else if (dx !== 0) {
+    offsets = [[dx, 0], [dx, 1], [dx, -1]];
+  } else {
+    offsets = [[0, dy], [1, dy], [-1, dy]];
+  }
+  for (const [ox, oy] of offsets) {
+    const x = from.x + ox;
+    const y = from.y + oy;
+    if (world.inBounds(x, y) && world.tileAt(x, y).terrain !== 'water') {
+      return { x, y };
+    }
+  }
+  return { x: from.x, y: from.y };
 }

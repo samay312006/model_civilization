@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { createRng } from '../../../src/engine/rng';
 import { dist } from '../../../src/shared/types';
-import type { Person } from '../../../src/shared/types';
-import { SPATIAL_CELL_SIZE, SpatialIndex } from '../../../src/engine/world/spatial';
+import type { Person, Terrain, Tile } from '../../../src/shared/types';
+import { World } from '../../../src/engine/world/terrain';
+import { SPATIAL_CELL_SIZE, SpatialIndex, stepToward } from '../../../src/engine/world/spatial';
 
 /** Complete Person with only id/pos/alive varying; everything else neutral. */
 function stubPerson(id: number, x: number, y: number, alive = true): Person {
@@ -38,6 +39,19 @@ function stubPerson(id: number, x: number, y: number, alive = true): Person {
     parentIds: null,
     causeOfDeath: null,
   };
+}
+
+/** Rows of characters: '~' water, anything else plains. */
+function makeWorld(rows: string[]): World {
+  const size = rows.length;
+  const tiles: Tile[] = [];
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const terrain: Terrain = rows[y][x] === '~' ? 'water' : 'plains';
+      tiles.push({ terrain, fertility: terrain === 'water' ? 0 : 0.5, food: 0, wood: 0, stone: 0, metal: 0 });
+    }
+  }
+  return new World(size, tiles);
 }
 
 describe('SpatialIndex', () => {
@@ -86,5 +100,39 @@ describe('SpatialIndex', () => {
     idx.rebuild(people);
     // dist to (7,7) = 9.90 <= 10 in; dist to (8,8) = 11.31 > 10 out
     expect(idx.near({ x: 0, y: 0 }, 10)).toEqual([0, 1]);
+  });
+});
+
+describe('stepToward', () => {
+  const open = makeWorld(['.....', '.....', '.....', '.....', '.....']);
+
+  it('moves one tile diagonally toward the target on open land', () => {
+    expect(stepToward({ x: 0, y: 0 }, { x: 4, y: 4 }, open)).toEqual({ x: 1, y: 1 });
+    expect(stepToward({ x: 4, y: 4 }, { x: 0, y: 0 }, open)).toEqual({ x: 3, y: 3 });
+    expect(stepToward({ x: 2, y: 2 }, { x: 2, y: 0 }, open)).toEqual({ x: 2, y: 1 });
+  });
+
+  it('falls back to an axis step when the diagonal is water', () => {
+    const w = makeWorld(['.....', '.~...', '.....', '.....', '.....']); // (1,1) water
+    expect(stepToward({ x: 0, y: 0 }, { x: 4, y: 4 }, w)).toEqual({ x: 1, y: 0 });
+  });
+
+  it('sidesteps when the direct axis step is water', () => {
+    const w = makeWorld(['.~...', '.....', '.....', '.....', '.....']); // (1,0) water
+    expect(stepToward({ x: 0, y: 0 }, { x: 4, y: 0 }, w)).toEqual({ x: 1, y: 1 });
+  });
+
+  it('returns the from-position when fully blocked by water', () => {
+    const w = makeWorld(['.~...', '~~...', '.....', '.....', '.....']); // (1,0),(0,1),(1,1) water
+    expect(stepToward({ x: 0, y: 0 }, { x: 4, y: 4 }, w)).toEqual({ x: 0, y: 0 });
+  });
+
+  it('returns the from-position when already at the target', () => {
+    expect(stepToward({ x: 2, y: 2 }, { x: 2, y: 2 }, open)).toEqual({ x: 2, y: 2 });
+  });
+
+  it('never steps off the map', () => {
+    expect(stepToward({ x: 0, y: 0 }, { x: -5, y: -5 }, open)).toEqual({ x: 0, y: 0 });
+    expect(stepToward({ x: 4, y: 4 }, { x: 9, y: 9 }, open)).toEqual({ x: 4, y: 4 });
   });
 });
