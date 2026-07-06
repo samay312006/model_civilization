@@ -180,9 +180,20 @@ describe('Simulation — narration wiring (Task 33 wires every narrate*/pushEven
     expect(sim.ctx.counters).toBeDefined();
   });
 
-  it('emits at least one birth event over 400 ticks of a 200-person run', () => {
+  it('emits at least one birth event over 700 ticks of a 200-person run', () => {
+    // Window sizing (evidence-backed, see .superpowers/sdd/task-33-report.md):
+    // courtship/conception/gestation are healthy but slow relative to 400 ticks.
+    // Instrumented first-birth tick across 5 seeds (courtship candidates were
+    // never scarce — 300/300 sampled ticks had >=2 unpartnered adults nearby):
+    //   seed  7 (this test's config): first partnership 136, first conception 261, first birth 531
+    //   seed  1: first partnership 168, first conception 453, first birth 723
+    //   seed  2: first partnership 222, first conception 476, first birth 759
+    //   seed 42: first partnership 107, first conception 158, first birth 428
+    //   seed 99: first partnership 121, first conception 207, first birth 477
+    // This test pins seed 7 (via baseConfig()), whose first birth lands at tick
+    // 531 deterministically. 700 ticks gives ~170 ticks of margin above that.
     const sim = new Simulation(baseConfig({ startPopulation: 200 }));
-    for (let i = 0; i < 400; i++) sim.tick();
+    for (let i = 0; i < 700; i++) sim.tick();
     const births = sim.ctx.events.filter((e) => e.kind === 'birth');
     expect(births.length).toBeGreaterThan(0);
   });
