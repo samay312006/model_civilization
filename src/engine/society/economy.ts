@@ -1,4 +1,5 @@
 import { clamp01, dist, type Civ, type Person, type Settlement, type Tick } from '../../shared/types';
+import { markFed } from '../agents/needs';
 import type { Rng } from '../rng';
 
 /** Deviation 1: the minimal structural subset of the eventual EngineCtx economy reads/writes. */
@@ -29,6 +30,10 @@ function shareRate(p: Person): number {
  * Members deposit surplus food above SHARE_DEPOSIT_FLOOR into their
  * settlement's stock, scaled by shareRate; hungry members (needs.hunger >
  * SHARE_DRAW_HUNGER_THRESHOLD) draw up to 1 food from stock when available.
+ * The draw is an eating event like execute.ts's food-acquisition handlers:
+ * it marks the member fed and reduces needs.hunger directly by the amount
+ * drawn (controller-sanctioned consistency fix alongside the execute.ts
+ * hunger-reduction fix; see task-33-report.md).
  */
 export function shareWithin(ctx: EconomyCtxLike): void {
   for (const s of [...ctx.settlements].sort((a, b) => a.id - b.id)) {
@@ -48,6 +53,12 @@ export function shareWithin(ctx: EconomyCtxLike): void {
         const draw = Math.min(1, s.stock.food);
         s.stock.food -= draw;
         p.inventory.food += draw;
+        // Consistent with execute.ts's food-acquisition handlers (Task 15 brief:
+        // "eating reduces p.needs.hunger directly by the amount eaten"): drawing
+        // from settlement stock is the same eating event, just sourced from the
+        // shared granary instead of the person's own labor this tick.
+        markFed(p);
+        p.needs.hunger = clamp01(p.needs.hunger - draw);
       }
     }
   }

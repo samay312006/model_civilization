@@ -99,12 +99,47 @@ describe('executeAction — gather', () => {
     const world = flatWorld(64, 0.5, 0.3); // tile.food = 0.3 < base+skill
     const ctx = makeCtx([p], world);
     const before = p.skills.gathering;
+    const hungerBefore = p.needs.hunger; // 0.3, set by makeAdult
     const outcome = executeAction(p, { kind: 'gather', tile: { x: 10, y: 10 } }, ctx, NEUTRAL_VOLATILITY);
     expect(p.inventory.food).toBeCloseTo(0.3, 6);
     expect(world.tileAt(10, 10).food).toBeCloseTo(0, 6);
     expect(p.skills.gathering).toBeGreaterThan(before);
     expect(outcome.success).toBe(true);
     expect(outcome.reward).toBeGreaterThan(0);
+    // Eating reduces hunger directly by the amount eaten: 0.3 - 0.3 = 0 (clamped to >= 0).
+    expect(p.needs.hunger).toBeCloseTo(Math.max(0, hungerBefore - 0.3), 6);
+  });
+
+  it('regression: acquiring food strictly lowers hunger (gather, hunt, share-receiving)', () => {
+    const world = flatWorld(64, 0.5, 3);
+
+    // gather: amount = min(3, 0.5 + 0) = 0.5; hunger 0.3 -> 0.3 - 0.5 = 0 (clamped)
+    const gatherer = makeAdult(1, 10, 10);
+    const gatherHungerBefore = gatherer.needs.hunger;
+    const gatherCtx = makeCtx([gatherer], world);
+    executeAction(gatherer, { kind: 'gather', tile: { x: 10, y: 10 } }, gatherCtx, NEUTRAL_VOLATILITY);
+    expect(gatherer.needs.hunger).toBeLessThan(gatherHungerBefore);
+    expect(gatherer.needs.hunger).toBeCloseTo(0, 6);
+
+    // hunt: forced success via stubbed rng.chance; amount = HUNT_FOOD_YIELD = 2.0
+    const hunter = makeAdult(2, 10, 10);
+    hunter.skills.fighting = 1;
+    const hunterHungerBefore = hunter.needs.hunger; // 0.3
+    const huntCtx = makeCtx([hunter], world);
+    huntCtx.rng = { ...huntCtx.rng, chance: (prob: number) => prob > 0.5 } as typeof huntCtx.rng;
+    executeAction(hunter, { kind: 'hunt' }, huntCtx, NEUTRAL_VOLATILITY);
+    expect(hunter.needs.hunger).toBeLessThan(hunterHungerBefore);
+    expect(hunter.needs.hunger).toBeCloseTo(0, 6); // 0.3 - 2.0 clamped to 0
+
+    // share (receiving side): target gains SHARE_AMOUNT (1) food -> hunger drops by 1, clamped
+    const giver = makeAdult(3, 10, 10);
+    giver.inventory.food = 5;
+    const receiver = makeAdult(4, 11, 10);
+    const receiverHungerBefore = receiver.needs.hunger; // 0.3
+    const shareCtx = makeCtx([giver, receiver], world);
+    executeAction(giver, { kind: 'share', targetPersonId: 4 }, shareCtx, NEUTRAL_VOLATILITY);
+    expect(receiver.needs.hunger).toBeLessThan(receiverHungerBefore);
+    expect(receiver.needs.hunger).toBeCloseTo(0, 6); // 0.3 - 1 clamped to 0
   });
 });
 

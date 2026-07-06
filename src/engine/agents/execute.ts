@@ -219,7 +219,10 @@ function execGather(p: Person, a: Action, ctx: ExecuteCtxLike): Outcome {
   const amount = Math.min(t.food, GATHER_BASE_YIELD + p.skills.gathering);
   t.food -= amount;
   p.inventory.food += amount;
-  if (amount > 0) markFed(p);
+  if (amount > 0) {
+    markFed(p);
+    p.needs.hunger = clamp01(p.needs.hunger - amount);
+  }
   p.skills.gathering = clamp01(p.skills.gathering + GATHER_SKILL_PRACTICE);
   const civ = civOf(ctx, p);
   if (civ !== undefined) {
@@ -240,7 +243,10 @@ function execFarm(p: Person, a: Action, ctx: ExecuteCtxLike): Outcome {
   const amount = Math.min(t.food, grown);
   t.food -= amount;
   p.inventory.food += amount;
-  if (amount > 0) markFed(p);
+  if (amount > 0) {
+    markFed(p);
+    p.needs.hunger = clamp01(p.needs.hunger - amount);
+  }
   p.skills.farming = clamp01(p.skills.farming + GATHER_SKILL_PRACTICE);
   if (civ !== undefined) ctx.tech.addKnowledge(civ, 'agriculture', amount);
   return outcomeOf(a, amount > 0, amount / 3, ctx.tick);
@@ -254,6 +260,7 @@ function execHunt(p: Person, ctx: ExecuteCtxLike, volatility: Emotions): Outcome
   if (success) {
     p.inventory.food += HUNT_FOOD_YIELD;
     markFed(p);
+    p.needs.hunger = clamp01(p.needs.hunger - HUNT_FOOD_YIELD);
   }
   if (ctx.rng.chance(HUNT_INJURY_CHANCE)) {
     p.health = clamp01(p.health - HUNT_INJURY_HEALTH);
@@ -385,8 +392,14 @@ function execTrade(p: Person, a: Action, ctx: ExecuteCtxLike): Outcome {
   target.inventory[give] += TRADE_SWAP_AMOUNT;
   target.inventory[receive] -= TRADE_SWAP_AMOUNT;
   p.inventory[receive] += TRADE_SWAP_AMOUNT;
-  if (receive === 'food') markFed(p);
-  if (give === 'food') markFed(target);
+  if (receive === 'food') {
+    markFed(p);
+    p.needs.hunger = clamp01(p.needs.hunger - TRADE_SWAP_AMOUNT);
+  }
+  if (give === 'food') {
+    markFed(target);
+    target.needs.hunger = clamp01(target.needs.hunger - TRADE_SWAP_AMOUNT);
+  }
 
   adjustRelationship(p, target.id, relationshipKind(p, target.id), 0.03);
   adjustRelationship(target, p.id, relationshipKind(target, p.id), 0.03);
@@ -401,6 +414,7 @@ function execShare(p: Person, a: Action, ctx: ExecuteCtxLike, volatility: Emotio
   p.inventory.food -= SHARE_AMOUNT;
   target.inventory.food += SHARE_AMOUNT;
   markFed(target);
+  target.needs.hunger = clamp01(target.needs.hunger - SHARE_AMOUNT);
   remember(p, { tick: ctx.tick, kind: 'shared', otherId: target.id, valence: 0.6, salience: 0.4 });
   remember(target, { tick: ctx.tick, kind: 'helped', otherId: p.id, valence: 0.6, salience: 0.5 });
   adjustRelationship(p, target.id, relationshipKind(p, target.id), 0.05);
@@ -419,7 +433,10 @@ function execSteal(p: Person, a: Action, ctx: ExecuteCtxLike, volatility: Emotio
     }
     target.inventory[resource] -= STEAL_PERSON_AMOUNT;
     p.inventory[resource] += STEAL_PERSON_AMOUNT;
-    if (resource === 'food') markFed(p);
+    if (resource === 'food') {
+      markFed(p);
+      p.needs.hunger = clamp01(p.needs.hunger - STEAL_PERSON_AMOUNT);
+    }
     const perceivedChance = clamp01(STEAL_PERCEIVED_CHANCE_BASE - 0.3 * p.skills.fighting + 0.3 * target.skills.fighting);
     if (ctx.rng.chance(perceivedChance)) {
       remember(target, { tick: ctx.tick, kind: 'stolen', otherId: p.id, valence: -0.7, salience: 0.6 });
@@ -440,7 +457,10 @@ function execSteal(p: Person, a: Action, ctx: ExecuteCtxLike, volatility: Emotio
   }
   settlement.stock[resource] -= STEAL_SETTLEMENT_AMOUNT;
   p.inventory[resource] += STEAL_SETTLEMENT_AMOUNT;
-  if (resource === 'food') markFed(p);
+  if (resource === 'food') {
+    markFed(p);
+    p.needs.hunger = clamp01(p.needs.hunger - STEAL_SETTLEMENT_AMOUNT);
+  }
   for (const memberId of settlement.memberIds) {
     const member = ctx.personById.get(memberId);
     if (member === undefined || !member.alive) continue;
