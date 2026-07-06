@@ -59,12 +59,19 @@ function actionKey(kind: string, targetPersonId?: number, tile?: { x: number; y:
  * `import{x}from'./y'` or `import*as ns from'./y'`) — both are valid TS but
  * were previously invisible to a regex that required `\s` right after
  * `import`.
+ *
+ * Fix A: `export ... from '...'` re-export forms (`export{h}from'../evil'`,
+ * `export * from '../evil'`, `export type {T} from './types'`) reach
+ * disallowed modules just as surely as an `import` would, so this must key
+ * off BOTH the `import` and `export` keywords — not `import` alone. A plain
+ * local `export const x = 1` has no `from` clause and correctly yields no
+ * specifier.
  */
 function extractImportSpecifiers(source: string): string[] {
   const specifiers: string[] = [];
-  const fromImportRe = /import\s*[\s\S]*?from\s*['"]([^'"]+)['"]/g;
+  const fromRe = /(?:\bimport|\bexport)\s*[\s\S]*?from\s*['"]([^'"]+)['"]/g;
   let match: RegExpExecArray | null;
-  while ((match = fromImportRe.exec(source)) !== null) {
+  while ((match = fromRe.exec(source)) !== null) {
     specifiers.push(match[1] as string);
   }
   const sideEffectImportRe = /import\s*['"]([^'"]+)['"]/g;
@@ -77,16 +84,23 @@ function extractImportSpecifiers(source: string): string[] {
 /**
  * Completeness cross-check for extractImportSpecifiers: counts static import
  * statements as (occurrences of the `import` keyword) minus (occurrences
- * used as a dynamic `import(...)` call). Every static import statement
- * contributes exactly one specifier, so this count must equal
- * extractImportSpecifiers(source).length — if some import syntax slips past
- * both extraction regexes above, the counts disagree and the conformance
- * test fails loudly instead of silently passing.
+ * used as a dynamic `import(...)` call), PLUS (Fix A) `export ... from
+ * '...'` re-export statements — counted independently by matching the
+ * export-keyword-to-from-clause shape directly, so a plain local `export
+ * const x = 1` (no `from` clause) contributes zero. Every static
+ * import/export-from statement contributes exactly one specifier, so this
+ * count must equal extractImportSpecifiers(source).length — if some
+ * import/export syntax slips past the extraction regexes above, the counts
+ * disagree and the conformance test fails loudly instead of silently
+ * passing.
  */
 function countStaticImportStatements(source: string): number {
   const allImportKeywords = source.match(/\bimport\b/g) ?? [];
   const dynamicImportCalls = source.match(/\bimport\s*\(/g) ?? [];
-  return allImportKeywords.length - dynamicImportCalls.length;
+  const staticImportCount = allImportKeywords.length - dynamicImportCalls.length;
+
+  const exportFromMatches = source.match(/\bexport\b[\s\S]*?\bfrom\s*['"][^'"]+['"]/g) ?? [];
+  return staticImportCount + exportFromMatches.length;
 }
 
 describe('import-extraction helpers (Finding 2 hardening)', () => {
@@ -126,17 +140,45 @@ describe('import-extraction helpers (Finding 2 hardening)', () => {
     expect(countStaticImportStatements(src)).toBe(0);
   });
 
+  it("catches a no-whitespace export-from re-export: export{h}from'../evil'", () => {
+    const src = "export{h}from'../evil'";
+    expect(extractImportSpecifiers(src)).toEqual(['../evil']);
+    expect(countStaticImportStatements(src)).toBe(1);
+  });
+
+  it("catches a wildcard export-from re-export: export * from '../evil'", () => {
+    const src = "export * from '../evil'";
+    expect(extractImportSpecifiers(src)).toEqual(['../evil']);
+    expect(countStaticImportStatements(src)).toBe(1);
+  });
+
+  it("catches a type-only export-from re-export: export type { T } from './types'", () => {
+    const src = "export type { T } from './types'";
+    expect(extractImportSpecifiers(src)).toEqual(['./types']);
+    expect(countStaticImportStatements(src)).toBe(1);
+  });
+
+  it('does NOT count a plain local export with no from clause: export const x = 1', () => {
+    const src = 'export const x = 1';
+    expect(extractImportSpecifiers(src)).toEqual([]);
+    expect(countStaticImportStatements(src)).toBe(0);
+  });
+
   it('completeness cross-check agrees when all forms above appear together', () => {
     const src = [
       "import{X}from'./e'",
       "import*as n from'./e2'",
       "import type {A,\nB} from './types'",
+      "export{h}from'../evil'",
+      "export * from '../evil2'",
+      "export type { T } from './types2'",
       "import'./side'",
       "const m=await import('x')",
       "require('x')",
+      'export const x = 1',
     ].join('\n');
     const specifiers = extractImportSpecifiers(src);
-    expect(specifiers).toEqual(['./e', './e2', './types', './side']);
+    expect(specifiers).toEqual(['./e', './e2', './types', '../evil', '../evil2', './types2', './side']);
     expect(countStaticImportStatements(src)).toBe(specifiers.length);
   });
 });
@@ -353,6 +395,11 @@ describe.each(allBrains().map((b) => [b.lineage, b] as const))('brain conformanc
     expect(source).not.toMatch(/Math\.random/);
     expect(source).not.toMatch(/\bDate\.now\(/);
     expect(source).not.toMatch(/new Date\(/);
+
+    // Fix B (Minor): globalThis / process / window / document side-channels.
+    // Bare `self` is NOT banned — perception.self is legitimate brain code.
+    expect(source).not.toMatch(/\bglobalThis\b/);
+    expect(source).not.toMatch(/\bprocess\./);
   });
 
   // Minor: one direct getBrain(lineage) assertion per lineage.
