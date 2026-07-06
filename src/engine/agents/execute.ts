@@ -123,14 +123,24 @@ function civOf(ctx: ExecuteCtxLike, p: Person): Civ | undefined {
   return ctx.civs.find((c) => c.id === p.civId);
 }
 
+/** Trade's resource universe (Task 15 brief: "largest-surplus resource among food/wood/stone/metal"). */
 function resourceKeys(): (keyof Inventory)[] {
   return ['food', 'wood', 'stone', 'metal'];
 }
 
-function largestResource(inv: Inventory, exclude?: keyof Inventory): keyof Inventory | null {
+/** Steal's resource universe — the brief's eligibility sum explicitly includes tools. */
+function stealResourceKeys(): (keyof Inventory)[] {
+  return ['food', 'wood', 'stone', 'metal', 'tools'];
+}
+
+function largestResource(
+  inv: Inventory,
+  exclude?: keyof Inventory,
+  keys: (keyof Inventory)[] = resourceKeys(),
+): keyof Inventory | null {
   let best: keyof Inventory | null = null;
   let bestAmount = 0;
-  for (const key of resourceKeys()) {
+  for (const key of keys) {
     if (key === exclude) continue;
     if (inv[key] > bestAmount) {
       bestAmount = inv[key];
@@ -403,7 +413,7 @@ function execSteal(p: Person, a: Action, ctx: ExecuteCtxLike, volatility: Emotio
   if (a.targetPersonId !== undefined) {
     const target = ctx.personById.get(a.targetPersonId);
     if (target === undefined || !target.alive) return outcomeOf(a, false, -0.05, ctx.tick);
-    const resource = largestResource(target.inventory);
+    const resource = largestResource(target.inventory, undefined, stealResourceKeys());
     if (resource === null || target.inventory[resource] < STEAL_PERSON_AMOUNT) {
       return outcomeOf(a, false, -0.05, ctx.tick);
     }
@@ -424,7 +434,7 @@ function execSteal(p: Person, a: Action, ctx: ExecuteCtxLike, volatility: Emotio
   const tile = a.tile as Vec2;
   const settlement = ctx.settlements.find((s) => s.id !== p.settlementId && dist(tile, s.center) <= 1);
   if (settlement === undefined) return outcomeOf(a, false, -0.1, ctx.tick);
-  const resource = largestResource(settlement.stock);
+  const resource = largestResource(settlement.stock, undefined, stealResourceKeys());
   if (resource === null || settlement.stock[resource] < STEAL_SETTLEMENT_AMOUNT) {
     return outcomeOf(a, false, -0.05, ctx.tick);
   }

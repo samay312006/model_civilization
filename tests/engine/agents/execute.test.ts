@@ -349,6 +349,39 @@ describe('executeAction — steal', () => {
     expect(settlement.stock.food).toBeLessThan(5);
     expect(p.inventory.food).toBeGreaterThan(0);
   });
+
+  it('succeeds against a person target whose wealth is only tools', () => {
+    const p = makeAdult(1, 10, 10);
+    const other = makeAdult(2, 11, 10);
+    other.inventory = { food: 0, wood: 0, stone: 0, metal: 0, tools: 5 };
+    const world = flatWorld(64);
+    const ctx = makeCtx([p, other], world);
+    ctx.rng = { ...ctx.rng, chance: () => true } as typeof ctx.rng; // always perceived
+    const outcome = executeAction(p, { kind: 'steal', targetPersonId: 2 }, ctx, NEUTRAL_VOLATILITY);
+    expect(outcome.success).toBe(true);
+    expect(p.inventory.tools).toBeGreaterThan(0);
+    expect(other.inventory.tools).toBeLessThan(5);
+    expect(other.memory.some((m) => m.kind === 'stolen')).toBe(true);
+  });
+
+  it('succeeds against a settlement stocked only with tools', () => {
+    const p = makeAdult(1, 10, 10);
+    const settlement: Settlement = {
+      id: 2,
+      civId: 9,
+      name: 'Rival',
+      center: { x: 10, y: 10 },
+      memberIds: [],
+      stock: { food: 0, wood: 0, stone: 0, metal: 0, tools: 5 },
+      structures: { shelter: 0, granary: 0, wall: 0, shrine: 0 },
+    };
+    const world = flatWorld(64);
+    const ctx = makeCtx([p], world, [settlement]);
+    const outcome = executeAction(p, { kind: 'steal', tile: { x: 10, y: 10 } }, ctx, NEUTRAL_VOLATILITY);
+    expect(outcome.success).toBe(true);
+    expect(settlement.stock.tools).toBeLessThan(5);
+    expect(p.inventory.tools).toBeGreaterThan(0);
+  });
 });
 
 describe('executeAction — attack', () => {
