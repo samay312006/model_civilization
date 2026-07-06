@@ -85,8 +85,8 @@ export function maybeFoundReligion(ctx: ReligionCtxLike): void {
     .sort((a, b) => a.id - b.id);
 
   for (const candidate of candidates) {
-    const rng = ctx.rng.split(`religion-found-${ctx.tick}`);
-    if (!rng.chance(RELIGION_FOUNDING_CHANCE)) continue;
+    const roll = ctx.rng.split(`religion-founding-${candidate.id}-${ctx.tick}`);
+    if (!roll.chance(RELIGION_FOUNDING_CHANCE)) continue;
 
     const axes = topTwoMoralityAxes(candidate.morality);
     const moralityBias: Partial<Morality> = {};

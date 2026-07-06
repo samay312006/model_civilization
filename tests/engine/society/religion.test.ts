@@ -52,6 +52,11 @@ describe('maybeFoundReligion', () => {
     founder.morality.sanctity = RELIGION_FOUNDER_SANCTITY + 0.1;
     founder.morality.care = 0.9;
     founder.morality.fairness = 0.8;
+    // createPerson randomizes loyalty/authority/liberty (via rng.split('p1')); pin them below
+    // fairness so the intended top-2 axes (care, fairness) are deterministic regardless of seed.
+    founder.morality.loyalty = 0.2;
+    founder.morality.authority = 0.2;
+    founder.morality.liberty = 0.2;
     founder.influence = RELIGION_FOUNDER_INFLUENCE + 0.1;
     base.people = [founder];
     const rctx = makeReligionCtx(base, {
@@ -61,9 +66,14 @@ describe('maybeFoundReligion', () => {
 
     // Roll forward enough independent calls that the 0.02/tick chance fires at least once
     // deterministically for this seed; each call re-splits the rng by label+tick so ticks differ.
+    // The disaster event is re-anchored to the current tick each iteration so it stays within
+    // RELIGION_FOUNDING_WINDOW of `ctx.tick` for all 400 calls (mirroring production, where
+    // recentDisasterEvents is a rolling slice of "recent" events recomputed every tick rather
+    // than a single fixed-tick event that ages out of the window after 30 ticks).
     let founded = false;
     for (let t = 20; t < 20 + 400 && !founded; t++) {
       rctx.tick = t;
+      rctx.recentDisasterEvents = [{ tick: t, civId: 0, severity: 3 }];
       maybeFoundReligion(rctx);
       if (rctx.religions.length > 0) founded = true;
     }
@@ -73,9 +83,10 @@ describe('maybeFoundReligion', () => {
     expect(rel.founderId).toBe(1);
     expect(rel.civId).toBe(0);
     expect(rel.zeal).toBe(RELIGION_INITIAL_ZEAL);
-    // top-2 axes (care 0.9, fairness 0.8) each +0.15
-    expect(rel.moralityBias.care).toBeCloseTo(0.9 + RELIGION_MORALITY_BIAS_BONUS, 6);
-    expect(rel.moralityBias.fairness).toBeCloseTo(0.8 + RELIGION_MORALITY_BIAS_BONUS, 6);
+    // top-2 axes (care 0.9, fairness 0.8) each +0.15, clamped to [0,1] per spec
+    // (0.9 + 0.15 = 1.05 clamps to 1)
+    expect(rel.moralityBias.care).toBeCloseTo(Math.min(1, 0.9 + RELIGION_MORALITY_BIAS_BONUS), 6);
+    expect(rel.moralityBias.fairness).toBeCloseTo(Math.min(1, 0.8 + RELIGION_MORALITY_BIAS_BONUS), 6);
     expect(Object.keys(rel.moralityBias)).toHaveLength(2);
     expect(RELIGION_FOUNDING_WINDOW).toBe(30);
     expect(RELIGION_FOUNDER_SANCTITY).toBe(0.7);
