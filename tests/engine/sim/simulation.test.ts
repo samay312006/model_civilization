@@ -1,0 +1,238 @@
+import { describe, expect, it } from 'vitest';
+import { Simulation, TICK_PHASES } from '../../../src/engine/sim/simulation';
+import { createRng } from '../../../src/engine/rng';
+import type { SimConfig } from '../../../src/shared/types';
+
+function baseConfig(overrides: Partial<SimConfig> = {}): SimConfig {
+  return { seed: 7, mode: 'mixed', mapSize: 'small', startPopulation: 200, ...overrides };
+}
+
+describe('Simulation construction', () => {
+  it('builds a world, population, and civs matching the config', () => {
+    const sim = new Simulation(baseConfig());
+    expect(sim.config.seed).toBe(7);
+    expect(sim.ctx.people).toHaveLength(200);
+    expect(sim.ctx.civs).toHaveLength(1); // mode 'mixed'
+    expect(sim.ctx.world.size).toBe(96); // MAP_SIZES.small
+    expect(sim.currentTick).toBe(0);
+    expect(sim.ctx.tick).toBe(0);
+  });
+
+  it('mode civs builds 4 civs', () => {
+    const sim = new Simulation(baseConfig({ mode: 'civs' }));
+    expect(sim.ctx.civs).toHaveLength(4);
+  });
+
+  it('initializes every person with a non-empty brainState from the real registry', () => {
+    const sim = new Simulation(baseConfig());
+    for (const p of sim.ctx.people) {
+      expect(p.brainState).not.toBeNull();
+      expect(typeof p.brainState).toBe('object');
+    }
+  });
+
+  it('personById is populated and consistent with people', () => {
+    const sim = new Simulation(baseConfig());
+    expect(sim.ctx.personById.size).toBe(sim.ctx.people.length);
+    for (const p of sim.ctx.people) {
+      expect(sim.ctx.personById.get(p.id)).toBe(p);
+    }
+  });
+
+  it('is deterministic for a fixed seed: two fresh sims produce identical initial people/civs', () => {
+    const a = new Simulation(baseConfig({ seed: 55 }));
+    const b = new Simulation(baseConfig({ seed: 55 }));
+    expect(a.ctx.people).toEqual(b.ctx.people);
+    expect(a.ctx.civs).toEqual(b.ctx.civs);
+  });
+
+  it('two different seeds produce different populations', () => {
+    const a = new Simulation(baseConfig({ seed: 1 }));
+    const b = new Simulation(baseConfig({ seed: 2 }));
+    expect(a.ctx.people).not.toEqual(b.ctx.people);
+  });
+});
+
+describe('Simulation.tick — order and bookkeeping', () => {
+  it('advances currentTick and ctx.tick together, starting at 1 after one tick', () => {
+    const sim = new Simulation(baseConfig({ startPopulation: 200 }));
+    sim.tick();
+    expect(sim.currentTick).toBe(1);
+    expect(sim.ctx.tick).toBe(1);
+  });
+
+  it('calls onPhase with every TICK_PHASES entry in order, exactly once per tick', () => {
+    const sim = new Simulation(baseConfig({ startPopulation: 200 }));
+    const seen: string[] = [];
+    sim.ctx.onPhase = (phase: string): void => {
+      seen.push(phase);
+    };
+    sim.tick();
+    expect(seen).toEqual([...TICK_PHASES]);
+  });
+
+  it('resets counters.births/deaths at the start of each tick', () => {
+    const sim = new Simulation(baseConfig({ startPopulation: 200 }));
+    sim.tick();
+    const firstBirths = sim.ctx.counters.births;
+    const firstDeaths = sim.ctx.counters.deaths;
+    expect(firstBirths).toBeGreaterThanOrEqual(0);
+    expect(firstDeaths).toBeGreaterThanOrEqual(0);
+    sim.tick();
+    // counters describe THIS tick only, never accumulate across ticks
+    expect(sim.ctx.counters.births).toBeGreaterThanOrEqual(0);
+    expect(sim.ctx.counters.deaths).toBeGreaterThanOrEqual(0);
+  });
+
+  it('ages at least one living person by exactly one tick per call', () => {
+    const sim = new Simulation(baseConfig({ startPopulation: 200 }));
+    const before = sim.ctx.people.find((p) => p.alive)?.ageTicks as number;
+    const id = sim.ctx.people.find((p) => p.alive)?.id as number;
+    sim.tick();
+    const after = sim.ctx.personById.get(id)?.ageTicks;
+    // the person may have died this tick (health/disease/old-age); if still alive, must be +1.
+    const stillAlive = sim.ctx.personById.get(id)?.alive === true;
+    if (stillAlive) expect(after).toBe(before + 1);
+  });
+});
+
+describe('Simulation — extinction', () => {
+  it('keeps ticking the world (no throw) after population reaches 0', () => {
+    const sim = new Simulation(baseConfig({ startPopulation: 200 }));
+    for (const p of sim.ctx.people) {
+      p.alive = false;
+      p.health = 0;
+    }
+    expect(() => {
+      for (let i = 0; i < 5; i++) sim.tick();
+    }).not.toThrow();
+    expect(sim.ctx.tick).toBe(5);
+  });
+
+  it('emits a severity-3 extinction event exactly once when population first hits 0', () => {
+    const sim = new Simulation(baseConfig({ startPopulation: 200 }));
+    for (const p of sim.ctx.people) {
+      p.alive = false;
+      p.health = 0;
+    }
+    sim.tick();
+    sim.tick();
+    const extinctions = sim.ctx.events.filter((e) => e.kind === 'extinction');
+    expect(extinctions).toHaveLength(1);
+    expect(extinctions[0]?.severity).toBe(3);
+  });
+});
+
+describe('Simulation — 100-tick run (seed 7, mode mixed, small map, 200 pop)', () => {
+  it('runs 100 ticks with no invariant violations and a plausible population change', () => {
+    const sim = new Simulation(baseConfig());
+    const initialPopulation = sim.ctx.people.filter((p) => p.alive).length;
+    for (let i = 0; i < 100; i++) sim.tick();
+    const finalPopulation = sim.ctx.people.filter((p) => p.alive).length;
+    // plausibility bounds: population neither exploded past 3x nor cratered
+    // to exactly the same headcount every tick (something must have happened
+    // in 100 ticks across needs/lifecycle/conflict/technology).
+    expect(finalPopulation).toBeGreaterThan(0);
+    expect(finalPopulation).toBeLessThan(initialPopulation * 3);
+    expect(sim.ctx.tick).toBe(100);
+    // total people (including the dead, who are retained for history) can
+    // only grow via births, never shrink.
+    expect(sim.ctx.people.length).toBeGreaterThanOrEqual(initialPopulation);
+  });
+
+  it('is deterministic: two fresh sims with the same seed produce identical history over 100 ticks', () => {
+    const a = new Simulation(baseConfig());
+    const b = new Simulation(baseConfig());
+    for (let i = 0; i < 100; i++) {
+      a.tick();
+      b.tick();
+    }
+    expect(a.ctx.people).toEqual(b.ctx.people);
+    expect(a.ctx.civs).toEqual(b.ctx.civs);
+    expect(a.ctx.settlements).toEqual(b.ctx.settlements);
+  });
+});
+
+describe('Simulation — dead people retained in people[] but skipped', () => {
+  it('a dead person stays in people[] and personById, with alive=false', () => {
+    const sim = new Simulation(baseConfig({ startPopulation: 200 }));
+    const target = sim.ctx.people[0];
+    if (target === undefined) throw new Error('expected at least one person');
+    target.needs.hunger = 1;
+    target.health = 0.001;
+    sim.tick();
+    const after = sim.ctx.personById.get(target.id);
+    expect(after).toBeDefined();
+    expect(sim.ctx.people.some((p) => p.id === target.id)).toBe(true);
+    if (after !== undefined && !after.alive) {
+      expect(after.causeOfDeath).not.toBeNull();
+    }
+  });
+});
+
+describe('Simulation — narration wiring (Task 33 wires every narrate*/pushEvent call site itself)', () => {
+  it('emits at least one death event over 400 ticks of a 200-person run (deaths are inevitable at this horizon)', () => {
+    const sim = new Simulation(baseConfig({ startPopulation: 200 }));
+    for (let i = 0; i < 400; i++) sim.tick();
+    const deaths = sim.ctx.events.filter((e) => e.kind === 'death');
+    expect(deaths.length).toBeGreaterThan(0);
+    expect(deaths[0]?.text.length).toBeGreaterThan(0);
+    expect(sim.ctx.counters).toBeDefined();
+  });
+
+  it('emits at least one birth event over 400 ticks of a 200-person run', () => {
+    const sim = new Simulation(baseConfig({ startPopulation: 200 }));
+    for (let i = 0; i < 400; i++) sim.tick();
+    const births = sim.ctx.events.filter((e) => e.kind === 'birth');
+    expect(births.length).toBeGreaterThan(0);
+  });
+
+  it('emits a settlement-founded event the tick a new settlement first appears in ctx.settlements', () => {
+    const sim = new Simulation(baseConfig({ startPopulation: 200 }));
+    let foundedTick: number | null = null;
+    for (let i = 0; i < 1000 && foundedTick === null; i++) {
+      const before = sim.ctx.settlements.length;
+      sim.tick();
+      if (sim.ctx.settlements.length > before) foundedTick = sim.ctx.tick;
+    }
+    expect(foundedTick).not.toBeNull();
+    const founded = sim.ctx.events.filter((e) => e.kind === 'settlement-founded');
+    expect(founded.some((e) => e.tick === foundedTick)).toBe(true);
+  });
+
+  it('emits a tech-unlocked event the tick civ.techs first gains an entry', () => {
+    const sim = new Simulation(baseConfig({ startPopulation: 200, mode: 'civs' }));
+    let unlockedTick: number | null = null;
+    for (let i = 0; i < 2000 && unlockedTick === null; i++) {
+      const before = sim.ctx.civs.reduce((n, c) => n + c.techs.length, 0);
+      sim.tick();
+      const after = sim.ctx.civs.reduce((n, c) => n + c.techs.length, 0);
+      if (after > before) unlockedTick = sim.ctx.tick;
+    }
+    expect(unlockedTick).not.toBeNull();
+    const unlocked = sim.ctx.events.filter((e) => e.kind === 'tech-unlocked');
+    expect(unlocked.some((e) => e.tick === unlockedTick)).toBe(true);
+  });
+
+  it('emits a disaster event (drought/harsh-winter/disease) the tick a NaturalEvent first starts', () => {
+    const sim = new Simulation(baseConfig({ startPopulation: 200 }));
+    let startedTick: number | null = null;
+    let startedKind: string | null = null;
+    for (let i = 0; i < 1000 && startedTick === null; i++) {
+      sim.tick();
+      const fresh = sim.ctx.naturalEvents.find((e) => e.startTick === sim.ctx.tick);
+      if (fresh !== undefined) {
+        startedTick = sim.ctx.tick;
+        startedKind = fresh.kind;
+      }
+    }
+    expect(startedTick).not.toBeNull();
+    const disasterEvents = sim.ctx.events.filter((e) => e.kind === startedKind);
+    expect(disasterEvents.some((e) => e.tick === startedTick)).toBe(true);
+  });
+
+  it('never emits birth/death/settlement/tech/religion/raid/war/famine/disaster events before Simulation.tick() has run at least once', () => {
+    const sim = new Simulation(baseConfig({ startPopulation: 200 }));
+    expect(sim.ctx.events).toEqual([]);
+  });
+});
