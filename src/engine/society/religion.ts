@@ -143,7 +143,7 @@ export function spreadBeliefs(ctx: ReligionCtxLikeExtended): void {
     let worshippers = 0;
     for (const id of ctx.worshippersThisTick) {
       const p = ctx.people.find((q) => q.id === id);
-      if (p !== undefined && p.alive) worshippers += 1;
+      if (p !== undefined && p.alive && p.beliefIds.includes(religion.id)) worshippers += 1;
     }
     zeal += worshippers * RELIGION_WORSHIP_ZEAL_GAIN;
 

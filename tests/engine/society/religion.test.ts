@@ -49,7 +49,7 @@ describe('maybeFoundReligion', () => {
     const civ = makeTestCiv({ id: 0 });
     const base = makeTestCtx({ civs: [civ], tick: 20 });
     const founder = makePerson(1, 0, base);
-    founder.morality.sanctity = RELIGION_FOUNDER_SANCTITY + 0.1;
+    founder.morality.sanctity = 0.75; // pinned below fairness (0.8) to avoid a tied top-2 sort
     founder.morality.care = 0.9;
     founder.morality.fairness = 0.8;
     // createPerson randomizes loyalty/authority/liberty (via rng.split('p1')); pin them below
@@ -199,6 +199,7 @@ describe('spreadBeliefs', () => {
     const civ = makeTestCiv({ id: 0 });
     const base = makeTestCtx({ civs: [civ], tick: 0 });
     const founder = makePerson(1, 0, base);
+    founder.beliefIds = [1]; // must be a believer of religion 1 for the worship gain to be scoped to it
     base.people = [founder];
     const religion: ReligionRec = {
       id: 1,
@@ -208,8 +209,19 @@ describe('spreadBeliefs', () => {
       moralityBias: {},
       zeal: 0.5,
     };
+    // Second religion with no believers: pins the worship-gain scoping bug. zeal: 0 makes its
+    // adoption chance exactly 0 (chance(0) is never true, per Rng.chance), so founder cannot
+    // accidentally become a believer of it within this same call -- only decay/shrine can apply.
+    const otherReligion: ReligionRec = {
+      id: 2,
+      name: 'Otherism',
+      founderId: 1,
+      civId: 0,
+      moralityBias: {},
+      zeal: 0,
+    };
     const rctx = makeReligionCtx(base, {
-      religions: [religion],
+      religions: [religion, otherReligion],
       worshippersThisTick: new Set([1]),
       settlements: [{ civId: 0, structures: { shrine: 2 } }],
     });
@@ -218,6 +230,10 @@ describe('spreadBeliefs', () => {
 
     const expected = 0.5 - RELIGION_ZEAL_DECAY + RELIGION_WORSHIP_ZEAL_GAIN + 2 * RELIGION_SHRINE_ZEAL_GAIN;
     expect(religion.zeal).toBeCloseTo(expected, 6);
+
+    // worshipper 1 believes only in religion 1, so religion 2 must get decay + shrine but no worship gain
+    const expectedOther = 0 - RELIGION_ZEAL_DECAY + 2 * RELIGION_SHRINE_ZEAL_GAIN;
+    expect(otherReligion.zeal).toBeCloseTo(expectedOther, 6);
   });
 
   it('is a no-op when the founder is dead', () => {
