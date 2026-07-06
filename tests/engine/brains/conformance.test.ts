@@ -2,10 +2,10 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { allBrains } from '../../../src/engine/brains/registry';
+import { allBrains, getBrain } from '../../../src/engine/brains/registry';
 import type { Brain } from '../../../src/engine/brains/types';
 import { createRng } from '../../../src/engine/rng';
-import { ACTION_KINDS, LINEAGES } from '../../../src/shared/types';
+import { ACTION_KINDS, LINEAGES, type Lineage } from '../../../src/shared/types';
 import { makePerceptionFixture } from '../../helpers/perceptionFixture';
 
 const BRAIN_FILES: Record<string, string> = {
@@ -15,12 +15,20 @@ const BRAIN_FILES: Record<string, string> = {
   fable: 'src/engine/brains/fable.ts',
 };
 
-const ALLOWED_IMPORT_PREFIXES = [
-  '../../shared/types',
-  '../rng',
+/**
+ * Finding 1: exact-match allowlist. Only these specifiers (with or without a
+ * trailing `.js`) are legal from src/engine/brains/*.ts — no prefix bypass.
+ */
+const ALLOWED_IMPORT_SPECIFIERS = new Set<string>([
   './types',
+  './types.js',
+  '../rng',
+  '../rng.js',
   '../agents/perception',
-];
+  '../agents/perception.js',
+  '../../shared/types',
+  '../../shared/types.js',
+]);
 
 function actionKey(kind: string, targetPersonId?: number, tile?: { x: number; y: number }, structure?: string): string {
   const target = targetPersonId ?? 'none';
@@ -142,22 +150,88 @@ describe.each(allBrains().map((b) => [b.lineage, b] as const))('brain conformanc
     }
   });
 
+  // Finding 3: decide()/onOutcome() must never mutate the Perception passed
+  // in (this includes perception.self, which IS the live Person object).
+  it('decide and onOutcome never mutate the perception (including self)', () => {
+    const rng = createRng(2024);
+    const { person, perception } = makePerceptionFixture(rng, { lineage: lineageName });
+    const before = JSON.stringify(perception);
+
+    const brainState = brain.init(person, rng.split('mutation-init'));
+    const scored = brain.decide(perception, brainState, rng.split('mutation-decide'));
+    const action = scored[0]?.action ?? perception.candidates[0] ?? { kind: 'rest' as const };
+    brain.onOutcome({ action, success: true, reward: 0.5, tick: perception.tick }, brainState, rng.split('mutation-outcome'));
+
+    const after = JSON.stringify(perception);
+    expect(after).toBe(before);
+  });
+
+  // Finding 4: brainState must carry ALL decision-relevant state explicitly.
+  // If a brain hides anything decision-relevant in a closure or module-level
+  // variable, a JSON round trip of brainState will desync live vs.
+  // rehydrated decisions under identical (same-seeded) Rng streams.
+  it('rehydrated (JSON round-tripped) state decides identically to live state', () => {
+    const setupRng = createRng(31337);
+    const { person } = makePerceptionFixture(setupRng, { lineage: lineageName });
+    let liveState = brain.init(person, setupRng.split('rehydrate-init'));
+
+    // Run several decide()+onOutcome() rounds to accumulate any learned state.
+    for (let i = 0; i < 6; i++) {
+      const { perception: roundPerception } = makePerceptionFixture(setupRng, { lineage: lineageName });
+      const scored = brain.decide(roundPerception, liveState, setupRng.split(`rehydrate-decide-${i}`));
+      const action = scored[0]?.action ?? roundPerception.candidates[0] ?? { kind: 'rest' as const };
+      const success = i % 2 === 0;
+      brain.onOutcome(
+        { action, success, reward: success ? 0.5 : -0.5, tick: roundPerception.tick },
+        liveState,
+        setupRng.split(`rehydrate-outcome-${i}`),
+      );
+    }
+
+    const rehydratedState = JSON.parse(JSON.stringify(liveState));
+
+    const { perception: testPerception } = makePerceptionFixture(setupRng, { lineage: lineageName });
+    // Deep-copy the perception too, so both decide() calls read independent objects.
+    const perceptionForLive = JSON.parse(JSON.stringify(testPerception));
+    const perceptionForRehydrated = JSON.parse(JSON.stringify(testPerception));
+
+    const liveResult = brain.decide(perceptionForLive, liveState, createRng(4242));
+    const rehydratedResult = brain.decide(perceptionForRehydrated, rehydratedState, createRng(4242));
+
+    expect(JSON.stringify(rehydratedResult)).toEqual(JSON.stringify(liveResult));
+  });
+
   it('module source contains no forbidden imports', () => {
     const filePath = path.join(process.cwd(), BRAIN_FILES[lineageName] as string);
     const source = readFileSync(filePath, 'utf-8');
-    const importLines = source
-      .split('\n')
-      .map((l: string) => l.trim())
-      .filter((l: string) => l.startsWith('import '));
 
-    expect(importLines.length).toBeGreaterThan(0);
+    // Finding 2: no dynamic import() and no require() anywhere in the source.
+    expect(source).not.toMatch(/import\s*\(/);
+    expect(source).not.toMatch(/require\s*\(/);
 
-    for (const line of importLines) {
-      const match = line.match(/from\s+['"]([^'"]+)['"]/);
-      expect(match).not.toBeNull();
-      const importPath = (match as RegExpMatchArray)[1] as string;
-      const isAllowed = ALLOWED_IMPORT_PREFIXES.some((prefix) => importPath === prefix || importPath.startsWith(prefix));
-      expect(isAllowed, `disallowed import "${importPath}" in ${BRAIN_FILES[lineageName]}`).toBe(true);
+    // Finding 2: extract every static import specifier over the WHOLE
+    // source (multiline-safe), covering both `import ... from '...'` (incl.
+    // wrapped `import type {\n...\n} from '...'`) and side-effect-only
+    // `import '...'` forms.
+    const specifiers: string[] = [];
+    const fromImportRe = /import\s[\s\S]*?from\s*['"]([^'"]+)['"]/g;
+    let match: RegExpExecArray | null;
+    while ((match = fromImportRe.exec(source)) !== null) {
+      specifiers.push(match[1] as string);
+    }
+    const sideEffectImportRe = /import\s*['"]([^'"]+)['"]/g;
+    while ((match = sideEffectImportRe.exec(source)) !== null) {
+      specifiers.push(match[1] as string);
+    }
+
+    expect(specifiers.length).toBeGreaterThan(0);
+
+    // Finding 1: EXACT match against the allowlist — no prefix bypass.
+    for (const importPath of specifiers) {
+      expect(
+        ALLOWED_IMPORT_SPECIFIERS.has(importPath),
+        `disallowed import "${importPath}" in ${BRAIN_FILES[lineageName]}`,
+      ).toBe(true);
     }
 
     expect(source).not.toMatch(/\bdocument\./);
@@ -166,6 +240,11 @@ describe.each(allBrains().map((b) => [b.lineage, b] as const))('brain conformanc
     expect(source).not.toMatch(/Math\.random/);
     expect(source).not.toMatch(/\bDate\.now\(/);
     expect(source).not.toMatch(/new Date\(/);
+  });
+
+  // Minor: one direct getBrain(lineage) assertion per lineage.
+  it('getBrain(lineage) returns this same brain', () => {
+    expect(getBrain(lineageName as Lineage)).toBe(brain);
   });
 });
 
