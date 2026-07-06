@@ -1,7 +1,7 @@
 /// <reference types="node" />
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { allBrains, getBrain } from '../../../src/engine/brains/registry';
 import type { Brain } from '../../../src/engine/brains/types';
 import { createRng } from '../../../src/engine/rng';
@@ -13,6 +13,22 @@ const BRAIN_FILES: Record<string, string> = {
   sonnet: 'src/engine/brains/sonnet.ts',
   haiku: 'src/engine/brains/haiku.ts',
   fable: 'src/engine/brains/fable.ts',
+};
+
+// Gap 2: relative module specifiers (from THIS test file) for a genuinely
+// fresh dynamic import per lineage, and the export name each module uses.
+const BRAIN_MODULE_PATHS: Record<string, string> = {
+  opus: '../../../src/engine/brains/opus',
+  sonnet: '../../../src/engine/brains/sonnet',
+  haiku: '../../../src/engine/brains/haiku',
+  fable: '../../../src/engine/brains/fable',
+};
+
+const BRAIN_EXPORT_NAMES: Record<string, string> = {
+  opus: 'opusBrain',
+  sonnet: 'sonnetBrain',
+  haiku: 'haikuBrain',
+  fable: 'fableBrain',
 };
 
 /**
@@ -36,6 +52,94 @@ function actionKey(kind: string, targetPersonId?: number, tile?: { x: number; y:
   const s = structure ?? 'none';
   return `${kind}|${target}|${t}|${s}`;
 }
+
+/**
+ * Finding 2 (hardened): extract every static import specifier from a TS
+ * source string. Tolerates ZERO whitespace after the `import` keyword (e.g.
+ * `import{x}from'./y'` or `import*as ns from'./y'`) — both are valid TS but
+ * were previously invisible to a regex that required `\s` right after
+ * `import`.
+ */
+function extractImportSpecifiers(source: string): string[] {
+  const specifiers: string[] = [];
+  const fromImportRe = /import\s*[\s\S]*?from\s*['"]([^'"]+)['"]/g;
+  let match: RegExpExecArray | null;
+  while ((match = fromImportRe.exec(source)) !== null) {
+    specifiers.push(match[1] as string);
+  }
+  const sideEffectImportRe = /import\s*['"]([^'"]+)['"]/g;
+  while ((match = sideEffectImportRe.exec(source)) !== null) {
+    specifiers.push(match[1] as string);
+  }
+  return specifiers;
+}
+
+/**
+ * Completeness cross-check for extractImportSpecifiers: counts static import
+ * statements as (occurrences of the `import` keyword) minus (occurrences
+ * used as a dynamic `import(...)` call). Every static import statement
+ * contributes exactly one specifier, so this count must equal
+ * extractImportSpecifiers(source).length — if some import syntax slips past
+ * both extraction regexes above, the counts disagree and the conformance
+ * test fails loudly instead of silently passing.
+ */
+function countStaticImportStatements(source: string): number {
+  const allImportKeywords = source.match(/\bimport\b/g) ?? [];
+  const dynamicImportCalls = source.match(/\bimport\s*\(/g) ?? [];
+  return allImportKeywords.length - dynamicImportCalls.length;
+}
+
+describe('import-extraction helpers (Finding 2 hardening)', () => {
+  it("extracts a no-whitespace named import: import{X}from'./e'", () => {
+    const src = "import{X}from'./e'";
+    expect(extractImportSpecifiers(src)).toEqual(['./e']);
+    expect(countStaticImportStatements(src)).toBe(1);
+  });
+
+  it("extracts a no-whitespace namespace import: import*as n from'./e'", () => {
+    const src = "import*as n from'./e'";
+    expect(extractImportSpecifiers(src)).toEqual(['./e']);
+    expect(countStaticImportStatements(src)).toBe(1);
+  });
+
+  it('extracts a wrapped multiline `import type {A,\\nB} from ...`', () => {
+    const src = "import type {A,\nB} from './types'";
+    expect(extractImportSpecifiers(src)).toEqual(['./types']);
+    expect(countStaticImportStatements(src)).toBe(1);
+  });
+
+  it("extracts a side-effect-only import: import'./side'", () => {
+    const src = "import'./side'";
+    expect(extractImportSpecifiers(src)).toEqual(['./side']);
+    expect(countStaticImportStatements(src)).toBe(1);
+  });
+
+  it("does NOT count a dynamic import as a static specifier: const m=await import('x')", () => {
+    const src = "const m=await import('x')";
+    expect(extractImportSpecifiers(src)).toEqual([]);
+    expect(countStaticImportStatements(src)).toBe(0);
+  });
+
+  it("does NOT count a bare require() as a static specifier: require('x')", () => {
+    const src = "require('x')";
+    expect(extractImportSpecifiers(src)).toEqual([]);
+    expect(countStaticImportStatements(src)).toBe(0);
+  });
+
+  it('completeness cross-check agrees when all forms above appear together', () => {
+    const src = [
+      "import{X}from'./e'",
+      "import*as n from'./e2'",
+      "import type {A,\nB} from './types'",
+      "import'./side'",
+      "const m=await import('x')",
+      "require('x')",
+    ].join('\n');
+    const specifiers = extractImportSpecifiers(src);
+    expect(specifiers).toEqual(['./e', './e2', './types', './side']);
+    expect(countStaticImportStatements(src)).toBe(specifiers.length);
+  });
+});
 
 describe.each(allBrains().map((b) => [b.lineage, b] as const))('brain conformance: %s', (lineageName, brain: Brain) => {
   it('has a lineage field matching the registry key', () => {
@@ -170,7 +274,7 @@ describe.each(allBrains().map((b) => [b.lineage, b] as const))('brain conformanc
   // If a brain hides anything decision-relevant in a closure or module-level
   // variable, a JSON round trip of brainState will desync live vs.
   // rehydrated decisions under identical (same-seeded) Rng streams.
-  it('rehydrated (JSON round-tripped) state decides identically to live state', () => {
+  it('rehydrated (JSON round-tripped) state decides identically to live state, even under a fresh module instance', async () => {
     const setupRng = createRng(31337);
     const { person } = makePerceptionFixture(setupRng, { lineage: lineageName });
     let liveState = brain.init(person, setupRng.split('rehydrate-init'));
@@ -196,7 +300,20 @@ describe.each(allBrains().map((b) => [b.lineage, b] as const))('brain conformanc
     const perceptionForRehydrated = JSON.parse(JSON.stringify(testPerception));
 
     const liveResult = brain.decide(perceptionForLive, liveState, createRng(4242));
-    const rehydratedResult = brain.decide(perceptionForRehydrated, rehydratedState, createRng(4242));
+
+    // Gap 2 fix: live and rehydrated decide() previously both ran against
+    // the SAME already-loaded module instance, so a brain hiding
+    // decision-relevant state in a module-level variable (invisible to the
+    // JSON round trip of brainState above) would false-pass. Force a
+    // genuinely fresh module instance for the rehydrated side via
+    // vi.resetModules() + a fresh dynamic import, so any such hidden state
+    // resets to its initial value and desyncs from the live module's
+    // accumulated state, causing this comparison to fail.
+    vi.resetModules();
+    const freshModule = (await import(BRAIN_MODULE_PATHS[lineageName] as string)) as Record<string, Brain>;
+    const freshBrain = freshModule[BRAIN_EXPORT_NAMES[lineageName] as string] as Brain;
+
+    const rehydratedResult = freshBrain.decide(perceptionForRehydrated, rehydratedState, createRng(4242));
 
     expect(JSON.stringify(rehydratedResult)).toEqual(JSON.stringify(liveResult));
   });
@@ -210,21 +327,17 @@ describe.each(allBrains().map((b) => [b.lineage, b] as const))('brain conformanc
     expect(source).not.toMatch(/require\s*\(/);
 
     // Finding 2: extract every static import specifier over the WHOLE
-    // source (multiline-safe), covering both `import ... from '...'` (incl.
-    // wrapped `import type {\n...\n} from '...'`) and side-effect-only
-    // `import '...'` forms.
-    const specifiers: string[] = [];
-    const fromImportRe = /import\s[\s\S]*?from\s*['"]([^'"]+)['"]/g;
-    let match: RegExpExecArray | null;
-    while ((match = fromImportRe.exec(source)) !== null) {
-      specifiers.push(match[1] as string);
-    }
-    const sideEffectImportRe = /import\s*['"]([^'"]+)['"]/g;
-    while ((match = sideEffectImportRe.exec(source)) !== null) {
-      specifiers.push(match[1] as string);
-    }
-
+    // source (multiline-safe), covering `import ... from '...'` (incl.
+    // wrapped `import type {\n...\n} from '...'` and no-whitespace forms
+    // like `import{x}from'./y'`) and side-effect-only `import '...'` forms.
+    const specifiers = extractImportSpecifiers(source);
     expect(specifiers.length).toBeGreaterThan(0);
+
+    // Finding 2 (hardened): completeness cross-check. If some import syntax
+    // slips past extractImportSpecifiers (e.g. an unusual no-whitespace
+    // form), this count disagrees with the extracted specifier count and
+    // the test fails loudly instead of silently passing.
+    expect(specifiers.length).toBe(countStaticImportStatements(source));
 
     // Finding 1: EXACT match against the allowlist — no prefix bypass.
     for (const importPath of specifiers) {
