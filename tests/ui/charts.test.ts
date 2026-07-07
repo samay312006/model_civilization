@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest';
-import { radarChart } from '../../src/ui/charts';
+import { lineChart, radarChart, stackedAreaChart } from '../../src/ui/charts';
 
 /** Minimal 2D context stub shared by every chart test in this file (and extended, not replaced, by Task 42). */
 function stubContext(canvas: HTMLCanvasElement): { calls: string[] } {
@@ -15,6 +15,7 @@ function stubContext(canvas: HTMLCanvasElement): { calls: string[] } {
     closePath: vi.fn(() => calls.push('closePath')),
     stroke: vi.fn(() => calls.push('stroke')),
     fill: vi.fn(() => calls.push('fill')),
+    fillRect: vi.fn(() => calls.push('fillRect')),
     fillText: vi.fn(() => calls.push('fillText')),
     arc: vi.fn(() => calls.push('arc')),
     set fillStyle(_v: string) {},
@@ -75,5 +76,100 @@ describe('radarChart', () => {
     const { calls } = stubContext(canvas);
     radarChart(canvas, [], [], '#fff');
     expect(calls).toContain('clearRect');
+  });
+});
+
+describe('lineChart', () => {
+  it('does not throw on an empty series array', () => {
+    const canvas = makeCanvas();
+    stubContext(canvas);
+    expect(() => lineChart(canvas, [])).not.toThrow();
+  });
+
+  it('does not throw with a many-point series', () => {
+    const canvas = makeCanvas();
+    stubContext(canvas);
+    const points = Array.from({ length: 500 }, (_, i) => Math.sin(i / 10) * 50 + 50);
+    expect(() => lineChart(canvas, [{ label: 'population', color: '#3d9be9', points }])).not.toThrow();
+  });
+
+  it('does not throw with a single-point series (draws a dot, not a line)', () => {
+    const canvas = makeCanvas();
+    const { calls } = stubContext(canvas);
+    expect(() => lineChart(canvas, [{ label: 'population', color: '#3d9be9', points: [42] }])).not.toThrow();
+    expect(calls).toContain('arc');
+  });
+
+  it('does not throw with a zero-point series', () => {
+    const canvas = makeCanvas();
+    stubContext(canvas);
+    expect(() => lineChart(canvas, [{ label: 'population', color: '#3d9be9', points: [] }])).not.toThrow();
+  });
+
+  it('handles multiple series of differing lengths without throwing', () => {
+    const canvas = makeCanvas();
+    stubContext(canvas);
+    expect(() =>
+      lineChart(canvas, [
+        { label: 'opus', color: '#d4a24e', points: [1, 2, 3] },
+        { label: 'sonnet', color: '#3d9be9', points: [1, 2, 3, 4, 5] },
+      ]),
+    ).not.toThrow();
+  });
+
+  it('respects an explicit yMax without throwing', () => {
+    const canvas = makeCanvas();
+    stubContext(canvas);
+    expect(() =>
+      lineChart(canvas, [{ label: 'x', color: '#fff', points: [10, 20, 30] }], { yMax: 100 }),
+    ).not.toThrow();
+  });
+});
+
+describe('stackedAreaChart', () => {
+  it('does not throw on an empty series array', () => {
+    const canvas = makeCanvas();
+    stubContext(canvas);
+    expect(() => stackedAreaChart(canvas, [])).not.toThrow();
+  });
+
+  it('does not throw with a single data point per series', () => {
+    const canvas = makeCanvas();
+    stubContext(canvas);
+    expect(() =>
+      stackedAreaChart(canvas, [
+        { label: 'opus', color: '#d4a24e', points: [0.5] },
+        { label: 'sonnet', color: '#3d9be9', points: [0.5] },
+      ]),
+    ).not.toThrow();
+  });
+
+  it('does not throw with many points across four lineage series', () => {
+    const canvas = makeCanvas();
+    stubContext(canvas);
+    const n = 300;
+    const series = ['opus', 'sonnet', 'haiku', 'fable'].map((label, idx) => ({
+      label,
+      color: '#fff',
+      points: Array.from({ length: n }, (_, i) => 0.25 + Math.sin(i / 20 + idx) * 0.05),
+    }));
+    expect(() => stackedAreaChart(canvas, series)).not.toThrow();
+  });
+
+  it('does not throw when series have zero-length points', () => {
+    const canvas = makeCanvas();
+    stubContext(canvas);
+    expect(() => stackedAreaChart(canvas, [{ label: 'opus', color: '#fff', points: [] }])).not.toThrow();
+  });
+
+  it('does not throw when series have mismatched point-array lengths', () => {
+    const canvas = makeCanvas();
+    stubContext(canvas);
+    expect(() =>
+      stackedAreaChart(canvas, [
+        { label: 'opus', color: '#fff', points: [0.5, 0.5, 0.5] },
+        { label: 'sonnet', color: '#000', points: [0.5] },
+      ]),
+    ).not.toThrow();
   });
 });

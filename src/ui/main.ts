@@ -5,6 +5,7 @@ import { SimClient } from './client';
 import { renderControls } from './controls';
 import { MapView } from './map';
 import { renderInspector } from './inspector';
+import { renderDashboard } from './dashboard';
 import type { SimConfig } from '../shared/types';
 import type { Snapshot } from '../shared/protocol';
 
@@ -116,6 +117,11 @@ export function mountApp(root: HTMLElement): void {
     });
     mapView.onPickPerson((personId) => {
       client.send({ type: 'inspect', personId });
+    });
+
+    const dashboardHandle = renderDashboard(root.querySelector('#dock-dashboard')!);
+    client.onSnapshot((snapshot) => {
+      dashboardHandle.onSnapshot(snapshot);
     });
   });
 }

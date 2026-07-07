@@ -96,3 +96,109 @@ export function radarChart(canvas: HTMLCanvasElement, axes: string[], values: nu
 
   ctx.restore();
 }
+
+export interface ChartSeries {
+  label: string;
+  color: string;
+  points: number[];
+}
+
+const LINE_CHART_LEGEND_MARGIN_PX = 8;
+const LINE_CHART_DOT_RADIUS_PX = 2;
+
+/**
+ * Contract signature verbatim. Each series is plotted over its own point
+ * count independently (never a shared index range), so series of
+ * differing lengths never throw or misalign.
+ */
+export function lineChart(
+  canvas: HTMLCanvasElement,
+  series: ChartSeries[],
+  opts?: { yMax?: number },
+): void {
+  const ctx = canvas.getContext('2d');
+  if (ctx === null) return;
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.save();
+  ctx.clearRect(0, 0, w, h);
+
+  let maxValue = 0;
+  for (const s of series) for (const p of s.points) if (p > maxValue) maxValue = p;
+  const yMax = opts?.yMax ?? Math.max(1, maxValue);
+
+  for (const s of series) {
+    const n = s.points.length;
+    if (n === 0) continue;
+    ctx.strokeStyle = s.color;
+    ctx.fillStyle = s.color;
+    ctx.lineWidth = 2;
+    if (n === 1) {
+      const y = h - (Math.max(0, s.points[0] as number) / yMax) * h;
+      ctx.beginPath();
+      ctx.arc(w / 2, y, LINE_CHART_DOT_RADIUS_PX, 0, Math.PI * 2);
+      ctx.fill();
+      continue;
+    }
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const x = (i / (n - 1)) * w;
+      const y = h - (Math.max(0, s.points[i] as number) / yMax) * h;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+
+  ctx.font = '10px Inter, system-ui, sans-serif';
+  ctx.textAlign = 'left';
+  series.forEach((s, i) => {
+    ctx.fillStyle = s.color;
+    ctx.fillText(s.label, LINE_CHART_LEGEND_MARGIN_PX, h - LINE_CHART_LEGEND_MARGIN_PX - i * 12);
+  });
+
+  ctx.restore();
+}
+
+/**
+ * Contract signature verbatim ("lineage share" annotation). Draws
+ * series.length stacked bands bottom-to-top by cumulative sum at each x
+ * position, using the shortest series length actually present so
+ * mismatched-length series never index out of bounds.
+ */
+export function stackedAreaChart(canvas: HTMLCanvasElement, series: ChartSeries[]): void {
+  const ctx = canvas.getContext('2d');
+  if (ctx === null) return;
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.save();
+  ctx.clearRect(0, 0, w, h);
+
+  if (series.length === 0) {
+    ctx.restore();
+    return;
+  }
+
+  let n = Infinity;
+  for (const s of series) n = Math.min(n, s.points.length);
+  if (!Number.isFinite(n) || n === 0) {
+    ctx.restore();
+    return;
+  }
+
+  for (let i = 0; i < n; i++) {
+    const x0 = (i / n) * w;
+    const x1 = ((i + 1) / n) * w;
+    let cumulative = 0;
+    for (const s of series) {
+      const v = Math.max(0, s.points[i] as number);
+      const yTop = h - (cumulative + v) * h;
+      const yBottom = h - cumulative * h;
+      ctx.fillStyle = s.color;
+      ctx.fillRect(x0, yTop, Math.max(1, x1 - x0), yBottom - yTop);
+      cumulative += v;
+    }
+  }
+
+  ctx.restore();
+}
