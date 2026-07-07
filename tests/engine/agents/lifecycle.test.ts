@@ -31,6 +31,8 @@ const alwaysRng: Rng = {
   chance: (_p: number) => true,
   gaussian: (mean: number, _sd: number) => mean,
   split: (_label: string): Rng => alwaysRng,
+  getState: () => 0,
+  setState: (_s: number) => undefined,
 };
 
 /** A normalized adult: 20 years old, healthy, fed, calm, unattached. */

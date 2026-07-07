@@ -10,7 +10,7 @@ import {
 } from '../../shared/types';
 import { createRng, type Rng } from '../rng';
 import { makeNameGenerator, type NameGen } from '../names';
-import { generateWorld, type World } from '../world/terrain';
+import { generateWorld, World } from '../world/terrain';
 import { regenerateResources, updateNaturalEvents, type NaturalEvent } from '../world/climate';
 import { SpatialIndex } from '../world/spatial';
 import { initPopulation } from '../agents/person';
@@ -84,6 +84,51 @@ export const RNG_LABEL_EVENTS = 'events';
 export const RNG_LABEL_SOCIETY = 'society';
 export const RNG_LABEL_LIFECYCLE = 'lifecycle';
 
+/**
+ * Tag for one ctx.names.*() call, in call order. names.ts's NameGen wraps a
+ * single private Rng stream (`rng.split('names')`, advanced by every
+ * person()/place()/civ()/religion() call) with no getState()/setState() of
+ * its own — see task-36-report.md. save.ts therefore persists the ordered
+ * sequence of call kinds (not results: the sex argument to person() does
+ * not change how many underlying draws a call consumes, since both ending
+ * pools have equal length) so a restored run can fast-forward a freshly
+ * constructed NameGen back to the exact same stream position by replaying
+ * this log (discarding the outputs) before generating any new names.
+ */
+export type NameCallKind = 'person' | 'place' | 'civ' | 'religion';
+
+/** Wraps a NameGen so every call is appended to `log` in call order (see NameCallKind). */
+function wrapNames(raw: NameGen, log: NameCallKind[]): NameGen {
+  return {
+    person(sex) {
+      log.push('person');
+      return raw.person(sex);
+    },
+    place() {
+      log.push('place');
+      return raw.place();
+    },
+    civ() {
+      log.push('civ');
+      return raw.civ();
+    },
+    religion() {
+      log.push('religion');
+      return raw.religion();
+    },
+  };
+}
+
+/** Replays a previously-recorded name-call log against a fresh NameGen, discarding results, to fast-forward its internal stream. */
+function replayNames(raw: NameGen, log: readonly NameCallKind[]): void {
+  for (const kind of log) {
+    if (kind === 'person') raw.person('m');
+    else if (kind === 'place') raw.place();
+    else if (kind === 'civ') raw.civ();
+    else raw.religion();
+  }
+}
+
 // 'harsh-winter' is deliberately excluded: it is a routine seasonal hardship
 // (rolled every winter with its own chance, map-wide, never civ-ending) that
 // needs.ts/lifecycle.ts already model as ambient attrition, not the kind of
@@ -107,6 +152,8 @@ export interface EngineCtx {
   religions: Religion[];
   spatial: SpatialIndex;
   names: NameGen;
+  /** Ordered log backing `names`'s save/restore fast-forward — see NameCallKind. */
+  nameCallLog: NameCallKind[];
   tick: Tick;
   rng: Rng;
   events: NarrativeEvent[];
@@ -185,7 +232,8 @@ export class Simulation {
 
     const mapSizeTiles = { small: 96, medium: 144, large: 192 }[config.mapSize];
     const world = generateWorld(mapSizeTiles, worldRng);
-    const names = makeNameGenerator(rootRng.split('names'));
+    const nameCallLog: NameCallKind[] = [];
+    const names = wrapNames(makeNameGenerator(rootRng.split('names')), nameCallLog);
     const { people, civs } = initPopulation(config, world, names, rootRng.split('population'));
 
     for (const p of people) {
@@ -204,6 +252,7 @@ export class Simulation {
       religions: [],
       spatial: new SpatialIndex(),
       names,
+      nameCallLog,
       tick: 0,
       rng: rootRng,
       events: [],
@@ -212,6 +261,79 @@ export class Simulation {
       tech: { yieldMultiplier: techYieldMultiplier, addKnowledge },
     };
     this.currentTick = 0;
+  }
+
+  /**
+   * Reconstructs a Simulation from a previously-serialized envelope WITHOUT
+   * rerunning initPopulation or per-person brain init: every field is
+   * restored verbatim from the envelope, and ctx.rng's internal word is set
+   * to the saved rngState so future draws continue exactly where the saved
+   * run left off (split() streams are unaffected, since split derives from
+   * the root rng's creation seed, not its draw position).
+   *
+   * Deviation from the plan's original sketch (documented in
+   * task-36-report.md): `ctx.world` carries mutable per-tile resource state
+   * (food/wood/stone/metal deplete via foraging and regrow every tick via
+   * regenerateResources). Regenerating a fresh world from `generateWorld`
+   * here would reproduce only the pristine tick-0 terrain, discarding every
+   * tick's worth of consumption/regrowth history accumulated before the
+   * save point — which desyncs checksums a few ticks after any restore.
+   * The envelope's `world` field (added to SaveEnvelope by this task) is
+   * therefore restored verbatim instead of regenerated.
+   *
+   * Second deviation (also documented in task-36-report.md): `ctx.names`
+   * (NameGen) wraps its own private Rng stream with no getState()/setState()
+   * — see NameCallKind above. The envelope's `nameCallLog` is replayed
+   * (outputs discarded) against a freshly constructed NameGen to fast-
+   * forward it to the exact stream position the saved run had reached,
+   * before wrapping it to keep logging further calls.
+   */
+  static fromEnvelope(envelope: {
+    config: SimConfig;
+    tick: Tick;
+    rngState: number;
+    people: Person[];
+    civs: Civ[];
+    settlements: Settlement[];
+    religions: Religion[];
+    naturalEvents: NaturalEvent[];
+    eventLog: NarrativeEvent[];
+    world: World;
+    nameCallLog: NameCallKind[];
+  }): Simulation {
+    const sim = Object.create(Simulation.prototype) as Simulation;
+    const rng = createRng(envelope.config.seed);
+    rng.setState(envelope.rngState);
+
+    const world = new World(envelope.world.size, envelope.world.tiles);
+    const rawNames = makeNameGenerator(createRng(envelope.config.seed).split('names'));
+    replayNames(rawNames, envelope.nameCallLog);
+    const nameCallLog: NameCallKind[] = [...envelope.nameCallLog];
+    const names = wrapNames(rawNames, nameCallLog);
+
+    const personById = new Map<number, Person>();
+    for (const p of envelope.people) personById.set(p.id, p);
+
+    (sim as { config: SimConfig }).config = envelope.config;
+    (sim as { ctx: EngineCtx }).ctx = {
+      world,
+      people: envelope.people,
+      personById,
+      civs: envelope.civs,
+      settlements: envelope.settlements,
+      religions: envelope.religions,
+      spatial: new SpatialIndex(),
+      names,
+      nameCallLog,
+      tick: envelope.tick,
+      rng,
+      events: envelope.eventLog,
+      naturalEvents: envelope.naturalEvents,
+      counters: { births: 0, deaths: 0 },
+      tech: { yieldMultiplier: techYieldMultiplier, addKnowledge },
+    };
+    sim.currentTick = envelope.tick;
+    return sim;
   }
 
   tick(): void {

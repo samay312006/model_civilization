@@ -44,6 +44,8 @@ function forceChance(base: Rng): Rng {
     chance: () => true,
     gaussian: (mean, sd) => base.gaussian(mean, sd),
     split: (label) => forceChance(base.split(label)),
+    getState: () => base.getState(),
+    setState: (s) => base.setState(s),
   };
 }
 
@@ -57,6 +59,8 @@ function neverChance(base: Rng): Rng {
     chance: () => false,
     gaussian: (mean, sd) => base.gaussian(mean, sd),
     split: (label) => neverChance(base.split(label)),
+    getState: () => base.getState(),
+    setState: (s) => base.setState(s),
   };
 }
 

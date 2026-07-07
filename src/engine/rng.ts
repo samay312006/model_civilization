@@ -4,8 +4,9 @@
 //
 // Contract (docs/superpowers/plans/2026-07-04-genesis-contract.md):
 // all engine randomness flows through this module; same seed + same
-// labels = same streams. Math.random is forbidden in src/engine and
-// src/shared.
+// labels = same streams. Ambient, non-seeded randomness (the platform's
+// built-in "random" global) is forbidden in src/engine and src/shared —
+// see tests/engine/forbidden-api.test.ts.
 
 export interface Rng {
   /** Uniform float in [0, 1). */
@@ -28,6 +29,10 @@ export interface Rng {
    * needed per use.
    */
   split(label: string): Rng;
+  /** Returns the current internal mulberry32 word (same shape as the constructor seed). */
+  getState(): number;
+  /** Reseeds the generator's internal word in place; future draws continue from here. */
+  setState(s: number): void;
 }
 
 /** FNV-1a 32-bit hash over UTF-16 code units (labels are ASCII in practice). */
@@ -80,5 +85,13 @@ export function createRng(seed: number): Rng {
     return createRng(fnv1a(`${baseSeed}:${label}`));
   }
 
-  return { next, int, range, pick, chance, gaussian, split };
+  function getState(): number {
+    return state >>> 0;
+  }
+
+  function setState(s: number): void {
+    state = s >>> 0;
+  }
+
+  return { next, int, range, pick, chance, gaussian, split, getState, setState };
 }
