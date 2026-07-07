@@ -8,6 +8,8 @@ import {
   advanceByBatch,
   handleMessage,
   type WorkerState,
+  type UiToWorker,
+  type WorkerToUi,
 } from '../../src/shared/protocol';
 import type { SimConfig } from '../../src/shared/types';
 
@@ -21,19 +23,24 @@ function freshState(): WorkerState {
     snapshotsTaken: 0,
     msAccumulatorSinceSnapshot: 0,
     tickRemainder: 0,
+    terrainSent: false,
   };
 }
 
 describe('handleMessage — init', () => {
-  it('constructs a Simulation and replies ready + an initial snapshot with territory', () => {
+  it('constructs a Simulation and replies terrain + ready + an initial snapshot with territory', () => {
+    // Reconciliation (Task 40): 'init' now emits a 'terrain' reply ahead of
+    // 'ready'/the snapshot (see the terrain-reply describe block below), so
+    // this pre-existing (Task 37) assertion widens from length 2 to 3.
     const { state, replies } = handleMessage(freshState(), { type: 'init', config });
     expect(state.sim).not.toBeNull();
-    expect(replies).toHaveLength(2);
-    expect(replies[0]).toEqual({ type: 'ready' });
-    expect(replies[1]?.type).toBe('snapshot');
-    if (replies[1]?.type === 'snapshot') {
-      expect(replies[1].snapshot.territory).not.toBeNull();
-      expect(replies[1].snapshot.tick).toBe(0);
+    expect(replies).toHaveLength(3);
+    expect(replies[0]?.type).toBe('terrain');
+    expect(replies[1]).toEqual({ type: 'ready' });
+    expect(replies[2]?.type).toBe('snapshot');
+    if (replies[2]?.type === 'snapshot') {
+      expect(replies[2].snapshot.territory).not.toBeNull();
+      expect(replies[2].snapshot.tick).toBe(0);
     }
   });
 });
@@ -85,13 +92,16 @@ describe('handleMessage — step', () => {
   // per-tick cost enough to finish in ~11s (benchmarked). Full-scale
   // (200-person) generation-skip behavior is exercised by real usage and by
   // Task 45's long-run smoke tests, not by this unit test.
+  // Timeout raised 30s -> 60s (Task 40): this test takes ~28s standalone on
+  // this machine, and full-suite parallel load (this file now also carries
+  // Task 40's terrain-reply tests) pushed it just past the old 30s cap.
   it('n = -1 runs SKIP_GENERATION_TICKS ticks', () => {
     const smallConfig: SimConfig = { ...config, startPopulation: 20 };
     const { state: afterInit } = handleMessage(freshState(), { type: 'init', config: smallConfig });
     const { state } = handleMessage(afterInit, { type: 'step', n: -1 });
     expect(state.sim?.ctx.tick).toBe(SKIP_GENERATION_TICKS);
     expect(SKIP_GENERATION_TICKS).toBe(7200);
-  }, 30000);
+  }, 60000);
 
   it('replies with an error when there is no simulation yet', () => {
     const { replies } = handleMessage(freshState(), { type: 'step', n: 1 });
@@ -139,7 +149,10 @@ describe('handleMessage — serialize / load', () => {
     expect(replies[0]?.type).toBe('error');
   });
 
-  it('load replaces the simulation and replies with a fresh snapshot', () => {
+  it('load replaces the simulation and replies with terrain + a fresh snapshot', () => {
+    // Reconciliation (Task 40): 'load' now also emits a 'terrain' reply
+    // ahead of the snapshot (see the terrain-reply describe block below), so
+    // this pre-existing (Task 37) assertion widens from length 1 to 2.
     const { state: afterInit } = handleMessage(freshState(), { type: 'init', config });
     const { state: stepped } = handleMessage(afterInit, { type: 'step', n: 3 });
     const { replies: serializedReplies } = handleMessage(stepped, { type: 'serialize' });
@@ -147,8 +160,9 @@ describe('handleMessage — serialize / load', () => {
 
     const { state, replies } = handleMessage(freshState(), { type: 'load', json });
     expect(state.sim?.ctx.tick).toBe(3);
-    expect(replies).toHaveLength(1);
-    expect(replies[0]?.type).toBe('snapshot');
+    expect(replies).toHaveLength(2);
+    expect(replies[0]?.type).toBe('terrain');
+    expect(replies[1]?.type).toBe('snapshot');
   });
 
   it('load replies with an error on malformed json', () => {
@@ -273,5 +287,42 @@ describe('advanceByBatch', () => {
     for (const idx of territoryIndices) {
       expect((idx + 1) % TERRITORY_SNAPSHOT_EVERY === 0 || idx === 0).toBe(true);
     }
+  });
+});
+
+describe('handleMessage — terrain reply', () => {
+  // Reconciliation (Task 40 brief vs. Task 39's committed WorkerState): the
+  // brief's literal initialState predates Task 39's tickRemainder carry
+  // field (added to fix 1 tick/sec batching, see advanceByBatch above).
+  // WorkerState now requires tickRemainder, so it's included here to match
+  // the committed interface; freshState() above already carries it too.
+  const initialState: WorkerState = {
+    sim: null,
+    ticksPerSecond: 0,
+    ticksSinceLastSnapshot: 0,
+    snapshotsTaken: 0,
+    msAccumulatorSinceSnapshot: 0,
+    tickRemainder: 0,
+    terrainSent: false,
+  };
+
+  it('sends a terrain reply immediately after ready on init', () => {
+    const config = { seed: 1, mode: 'civs', mapSize: 'small', startPopulation: 200 } as const;
+    const { state, replies } = handleMessage(initialState, { type: 'init', config } as UiToWorker);
+    const terrainReply = replies.find((r): r is Extract<WorkerToUi, { type: 'terrain' }> => r.type === 'terrain');
+    expect(terrainReply).toBeDefined();
+    expect(terrainReply?.worldSize).toBeGreaterThan(0);
+    expect(terrainReply?.tiles.length).toBe((terrainReply?.worldSize ?? 0) ** 2);
+    expect(replies.findIndex((r) => r.type === 'terrain')).toBeLessThan(replies.findIndex((r) => r.type === 'snapshot'));
+    expect(state.terrainSent).toBe(true);
+  });
+
+  it('sends a fresh terrain reply on load (world may differ from the previous run)', () => {
+    const config = { seed: 1, mode: 'civs', mapSize: 'small', startPopulation: 200 } as const;
+    const { state: afterInit } = handleMessage(initialState, { type: 'init', config } as UiToWorker);
+    const json = handleMessage(afterInit, { type: 'serialize' }).replies.find((r) => r.type === 'serialized');
+    if (json === undefined || json.type !== 'serialized') throw new Error('expected a serialized reply');
+    const { replies } = handleMessage(afterInit, { type: 'load', json: json.json });
+    expect(replies.some((r) => r.type === 'terrain')).toBe(true);
   });
 });

@@ -16,6 +16,7 @@ let workerState: WorkerState = {
   snapshotsTaken: 0,
   msAccumulatorSinceSnapshot: 0,
   tickRemainder: 0,
+  terrainSent: false,
 };
 
 function transferablesOf(reply: WorkerToUi): Transferable[] {

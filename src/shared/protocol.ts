@@ -95,8 +95,8 @@ export type WorkerToUi =
   | { type: 'inspect'; detail: PersonDetail | null }
   | { type: 'serialized'; json: string }
   | { type: 'error'; message: string }
-  /** Forward-declared for Task 39's SimClient.onTerrain; Task 40 is the first
-   * to actually have the worker emit this. Not sent by handleMessage/advanceByBatch yet. */
+  /** Sent once by handleMessage's 'init'/'load' branches (Task 40), immediately
+   * ahead of 'ready'/the first snapshot, so MapView can paint the terrain layer. */
   | { type: 'terrain'; tiles: { terrain: Terrain }[]; worldSize: number };
 
 /** Contract speed presets; 0 = paused. */
@@ -123,6 +123,16 @@ export interface WorkerState {
    * emit exactly one tick every 10th batch instead of freezing forever.
    */
   tickRemainder: number;
+  /** True once the current sim's terrain has been sent to the UI (Task 40). */
+  terrainSent: boolean;
+}
+
+function terrainReply(sim: Simulation): WorkerToUi {
+  return {
+    type: 'terrain',
+    tiles: sim.ctx.world.tiles.map((t) => ({ terrain: t.terrain })),
+    worldSize: sim.ctx.world.size,
+  };
 }
 
 function snapshotReply(state: WorkerState, includeTerritory: boolean): { state: WorkerState; reply: WorkerToUi } {
@@ -151,9 +161,10 @@ export function handleMessage(state: WorkerState, msg: UiToWorker): { state: Wor
           snapshotsTaken: 0,
           msAccumulatorSinceSnapshot: 0,
           tickRemainder: 0,
+          terrainSent: true,
         };
         const { state: withSnap, reply } = snapshotReply(next, true);
-        return { state: withSnap, replies: [{ type: 'ready' }, reply] };
+        return { state: withSnap, replies: [terrainReply(sim), { type: 'ready' }, reply] };
       }
 
       case 'setSpeed': {
@@ -198,9 +209,10 @@ export function handleMessage(state: WorkerState, msg: UiToWorker): { state: Wor
           snapshotsTaken: 0,
           msAccumulatorSinceSnapshot: 0,
           tickRemainder: 0,
+          terrainSent: true,
         };
         const { state: withSnap, reply } = snapshotReply(next, true);
-        return { state: withSnap, replies: [reply] };
+        return { state: withSnap, replies: [terrainReply(sim), reply] };
       }
     }
   } catch (err) {
