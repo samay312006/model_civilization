@@ -3,6 +3,8 @@ import { THEME_CSS_PATH } from './dom';
 import { renderSetupScreen } from './setup';
 import { SimClient } from './client';
 import { renderControls } from './controls';
+import { MapView } from './map';
+import { renderInspector } from './inspector';
 import type { SimConfig } from '../shared/types';
 import type { Snapshot } from '../shared/protocol';
 
@@ -94,6 +96,26 @@ export function mountApp(root: HTMLElement): void {
     client.onSnapshot((snapshot) => {
       latestSnapshot = snapshot;
       controlsHandle.setReadout(snapshot.year, snapshot.season, snapshot.population);
+    });
+
+    const mapView = new MapView(root.querySelector('#map-canvas') as HTMLCanvasElement);
+    client.onSnapshot((snapshot) => {
+      mapView.render(snapshot);
+    });
+    client.onTerrain((tiles, worldSize) => {
+      mapView.setTerrain(tiles, worldSize);
+    });
+
+    const inspectorHandle = renderInspector(root.querySelector('#dock-inspector')!, {
+      onFollow: (personId) => {
+        client.send({ type: 'inspect', personId });
+      },
+    });
+    client.onInspect((detail) => {
+      inspectorHandle.show(detail);
+    });
+    mapView.onPickPerson((personId) => {
+      client.send({ type: 'inspect', personId });
     });
   });
 }
