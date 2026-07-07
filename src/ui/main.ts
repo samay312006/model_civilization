@@ -6,6 +6,7 @@ import { renderControls } from './controls';
 import { MapView } from './map';
 import { renderInspector } from './inspector';
 import { renderDashboard } from './dashboard';
+import { renderFeed } from './feed';
 import type { SimConfig } from '../shared/types';
 import type { Snapshot } from '../shared/protocol';
 
@@ -122,6 +123,12 @@ export function mountApp(root: HTMLElement): void {
     const dashboardHandle = renderDashboard(root.querySelector('#dock-dashboard')!);
     client.onSnapshot((snapshot) => {
       dashboardHandle.onSnapshot(snapshot);
+    });
+
+    const feedHandle = renderFeed(root.querySelector('#dock-feed')!);
+    client.onSnapshot((snapshot) => {
+      const civNames = new Map(snapshot.metrics.map((m) => [m.civId, m.name] as [number, string]));
+      feedHandle.push(snapshot.recentEvents, civNames);
     });
   });
 }

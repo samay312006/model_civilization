@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest';
-import { vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../src/ui/client', () => {
   class FakeSimClient {
@@ -36,8 +35,8 @@ vi.mock('../../src/ui/map', async () => {
   return { ...actual, MapView: FakeMapView };
 });
 
-describe('main.ts wires the dashboard to every snapshot', () => {
-  it('feeding a snapshot through the client populates dashboard tab content', async () => {
+describe('main.ts wires the event feed to every snapshot', () => {
+  it('feeding a snapshot with recentEvents populates the feed panel', async () => {
     const mod = await import('../../src/ui/main');
     const root = document.createElement('div');
     mod.mountApp(root);
@@ -48,7 +47,7 @@ describe('main.ts wires the dashboard to every snapshot', () => {
       tick: 360,
       year: 1,
       season: 'spring',
-      population: 100,
+      population: 1,
       worldSize: 96,
       ids: new Int32Array(0),
       xs: new Float32Array(0),
@@ -59,25 +58,26 @@ describe('main.ts wires the dashboard to every snapshot', () => {
       moods: new Uint8Array(0),
       settlements: [],
       territory: null,
-      recentEvents: [],
+      recentEvents: [{ tick: 300, kind: 'birth', severity: 1, civId: 0, text: 'A child is born to Mira and Boren.' }],
       metrics: [
         {
           civId: 0,
           name: 'Opus Dominion',
           color: '#e4572e',
-          population: 100,
+          population: 1,
           births: 1,
           deaths: 0,
-          techCount: 1,
+          techCount: 0,
           atWar: false,
           lineageShare: { opus: 1, sonnet: 0, haiku: 0, fable: 0 },
           avgMorality: { care: 0.5, fairness: 0.5, loyalty: 0.5, authority: 0.5, sanctity: 0.5, liberty: 0.5 },
-          avgEmotions: { fear: 0.1, joy: 0.5, grief: 0.1, anger: 0.1, hope: 0.5 },
+          avgEmotions: { fear: 0, joy: 0, grief: 0, anger: 0, hope: 0 },
           foodPerCapita: 1,
         },
       ],
     });
 
-    expect(root.querySelector('#dock-dashboard')?.textContent).toContain('Opus Dominion');
+    expect(root.querySelector('#dock-feed')?.textContent).toContain('A child is born to Mira and Boren.');
+    expect(root.querySelector('#dock-feed')?.textContent).toContain('Opus Dominion');
   });
 });
