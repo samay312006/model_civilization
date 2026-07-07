@@ -6,10 +6,14 @@ import type {
   Season,
   StructureKind,
   Tick,
+  SimConfig,
 } from './types';
 import type { NarrativeEvent } from '../engine/sim/events';
 import type { Temperament } from '../engine/brains/types';
 import type { Person } from './types';
+import { Simulation } from '../engine/sim/simulation';
+import { takeSnapshot, personDetail } from '../engine/sim/snapshot';
+import { serialize, deserialize } from '../engine/sim/save';
 
 export interface CivMetrics {
   civId: number;
@@ -74,4 +78,151 @@ export interface PersonDetail {
   temperament: Temperament;
   settlementName: string | null;
   civName: string;
+}
+
+export type UiToWorker =
+  | { type: 'init'; config: SimConfig }
+  | { type: 'setSpeed'; ticksPerSecond: number }
+  | { type: 'step'; n: number }
+  | { type: 'inspect'; personId: number }
+  | { type: 'serialize' }
+  | { type: 'load'; json: string };
+
+export type WorkerToUi =
+  | { type: 'ready' }
+  | { type: 'snapshot'; snapshot: Snapshot }
+  | { type: 'inspect'; detail: PersonDetail | null }
+  | { type: 'serialized'; json: string }
+  | { type: 'error'; message: string };
+
+/** Contract speed presets; 0 = paused. */
+export const SPEED_PRESETS: readonly number[] = [0, 1, 10, 60, 360, 1000];
+/** 'skip-generation' = 7200 ticks = 20 years at YEAR_TICKS = 360. */
+export const SKIP_GENERATION_TICKS = 7200;
+/** The interval loop batches ticks every 100ms (10 batches/sec). */
+export const BATCH_INTERVAL_MS = 100;
+/** ~5 snapshots/sec while running. */
+export const SNAPSHOT_INTERVAL_MS = 200;
+/** Territory is included on every 10th snapshot. */
+export const TERRITORY_SNAPSHOT_EVERY = 10;
+
+export interface WorkerState {
+  sim: Simulation | null;
+  ticksPerSecond: number;
+  ticksSinceLastSnapshot: number;
+  snapshotsTaken: number;
+  msAccumulatorSinceSnapshot: number;
+}
+
+function snapshotReply(state: WorkerState, includeTerritory: boolean): { state: WorkerState; reply: WorkerToUi } {
+  if (state.sim === null) throw new Error('snapshotReply called with no simulation');
+  const snapshot = takeSnapshot(state.sim, includeTerritory);
+  const nextSnapshotsTaken = state.snapshotsTaken + 1;
+  return {
+    state: { ...state, snapshotsTaken: nextSnapshotsTaken, ticksSinceLastSnapshot: 0 },
+    reply: { type: 'snapshot', snapshot },
+  };
+}
+
+/**
+ * Pure protocol reducer. Never throws: any failure inside a branch is caught
+ * and turned into a { type: 'error' } reply instead.
+ */
+export function handleMessage(state: WorkerState, msg: UiToWorker): { state: WorkerState; replies: WorkerToUi[] } {
+  try {
+    switch (msg.type) {
+      case 'init': {
+        const sim = new Simulation(msg.config);
+        const next: WorkerState = {
+          sim,
+          ticksPerSecond: 0,
+          ticksSinceLastSnapshot: 0,
+          snapshotsTaken: 0,
+          msAccumulatorSinceSnapshot: 0,
+        };
+        const { state: withSnap, reply } = snapshotReply(next, true);
+        return { state: withSnap, replies: [{ type: 'ready' }, reply] };
+      }
+
+      case 'setSpeed': {
+        const next: WorkerState = { ...state, ticksPerSecond: msg.ticksPerSecond };
+        if (next.sim === null) return { state: next, replies: [] };
+        const { state: withSnap, reply } = snapshotReply(next, false);
+        return { state: withSnap, replies: [reply] };
+      }
+
+      case 'step': {
+        if (state.sim === null) {
+          return { state, replies: [{ type: 'error', message: 'no simulation to step' }] };
+        }
+        const n = msg.n === -1 ? SKIP_GENERATION_TICKS : msg.n;
+        for (let i = 0; i < n; i++) state.sim.tick();
+        const { state: withSnap, reply } = snapshotReply(state, true);
+        return { state: withSnap, replies: [reply] };
+      }
+
+      case 'inspect': {
+        if (state.sim === null) {
+          return { state, replies: [{ type: 'inspect', detail: null }] };
+        }
+        const detail = personDetail(state.sim, msg.personId);
+        return { state, replies: [{ type: 'inspect', detail }] };
+      }
+
+      case 'serialize': {
+        if (state.sim === null) {
+          return { state, replies: [{ type: 'error', message: 'no simulation to serialize' }] };
+        }
+        const json = serialize(state.sim);
+        return { state, replies: [{ type: 'serialized', json }] };
+      }
+
+      case 'load': {
+        const sim = deserialize(msg.json);
+        const next: WorkerState = {
+          sim,
+          ticksPerSecond: 0,
+          ticksSinceLastSnapshot: 0,
+          snapshotsTaken: 0,
+          msAccumulatorSinceSnapshot: 0,
+        };
+        const { state: withSnap, reply } = snapshotReply(next, true);
+        return { state: withSnap, replies: [reply] };
+      }
+    }
+  } catch (err) {
+    return { state, replies: [{ type: 'error', message: err instanceof Error ? err.message : String(err) }] };
+  }
+}
+
+/**
+ * The interval-loop tick: at ticksPerSecond ticks/sec, BATCH_INTERVAL_MS of
+ * wall time is Math.round(ticksPerSecond * BATCH_INTERVAL_MS / 1000) engine
+ * ticks (100 ticks per call at the 1000 tick/s preset). Emits a snapshot
+ * (with territory every TERRITORY_SNAPSHOT_EVERY-th snapshot) whenever the
+ * accumulator reaches SNAPSHOT_INTERVAL_MS.
+ */
+export function advanceByBatch(state: WorkerState): { state: WorkerState; replies: WorkerToUi[] } {
+  if (state.sim === null || state.ticksPerSecond === 0) {
+    return { state, replies: [] };
+  }
+  const ticksThisBatch = Math.round((state.ticksPerSecond * BATCH_INTERVAL_MS) / 1000);
+  for (let i = 0; i < ticksThisBatch; i++) state.sim.tick();
+
+  let next: WorkerState = {
+    ...state,
+    ticksSinceLastSnapshot: state.ticksSinceLastSnapshot + ticksThisBatch,
+    msAccumulatorSinceSnapshot: state.msAccumulatorSinceSnapshot + BATCH_INTERVAL_MS,
+  };
+
+  const replies: WorkerToUi[] = [];
+  if (next.msAccumulatorSinceSnapshot >= SNAPSHOT_INTERVAL_MS) {
+    next = { ...next, msAccumulatorSinceSnapshot: next.msAccumulatorSinceSnapshot - SNAPSHOT_INTERVAL_MS };
+    const includeTerritory = next.snapshotsTaken % TERRITORY_SNAPSHOT_EVERY === 0;
+    const { state: withSnap, reply } = snapshotReply(next, includeTerritory);
+    next = withSnap;
+    replies.push(reply);
+  }
+
+  return { state: next, replies };
 }
