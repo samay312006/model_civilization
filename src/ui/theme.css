@@ -1,0 +1,354 @@
+/* Genesis dark observatory theme. Every color used anywhere in src/ui/
+   flows through these custom properties — no other file hardcodes a hex
+   value for background/text/panel/border colors. */
+
+:root {
+  --color-bg: #0b0e14;
+  --color-panel: #131722;
+  --color-border: #232a3a;
+  --color-text: #e6e9f0;
+  --color-text-dim: #9aa3b5;
+
+  /* Fixed per-civ palette (schism civs generate additional hues at
+     runtime in map.ts / dashboard.ts, outside this static sheet). */
+  --civ-color-0: #e4572e;
+  --civ-color-1: #3d9be9;
+  --civ-color-2: #76b041;
+  --civ-color-3: #b76ce9;
+
+  /* Lineage badge colors. */
+  --lineage-opus: #d4a24e;
+  --lineage-sonnet: #3d9be9;
+  --lineage-haiku: #76b041;
+  --lineage-fable: #b76ce9;
+
+  /* Terrain colors (used by map.ts's canvas terrain layer; listed here as
+     the single source of truth even though canvas fillStyle calls read
+     them as JS constants, not CSS — kept in sync by convention/tests). */
+  --terrain-water: #1a2f4a;
+  --terrain-plains: #2e4a2b;
+  --terrain-forest: #1f3d1f;
+  --terrain-mountain: #4a4a52;
+  --terrain-desert: #7a6a45;
+
+  /* Severity colors for the event feed. */
+  --severity-1: #6b7280;
+  --severity-2: #d4a24e;
+  --severity-3: #e4572e;
+
+  --radius-panel: 8px;
+  --dock-width: 380px;
+  --font-stack: Inter, system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-stack);
+}
+
+#app {
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- Panels ---- */
+
+.panel {
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
+  padding: 12px;
+}
+
+.panel-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--color-text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0 0 8px 0;
+}
+
+/* ---- Buttons ---- */
+
+.btn {
+  background: var(--color-panel);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-family: var(--font-stack);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.btn:hover {
+  border-color: var(--color-text-dim);
+}
+
+.btn.active {
+  background: var(--civ-color-1);
+  color: var(--color-bg);
+  border-color: var(--civ-color-1);
+}
+
+.btn-primary {
+  background: var(--civ-color-1);
+  color: var(--color-bg);
+  border-color: var(--civ-color-1);
+  font-weight: 600;
+}
+
+/* ---- Tabs ---- */
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: 8px;
+}
+
+.tab {
+  background: transparent;
+  color: var(--color-text-dim);
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 8px 10px;
+  font-family: var(--font-stack);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.tab.active {
+  color: var(--color-text);
+  border-bottom-color: var(--civ-color-1);
+}
+
+/* ---- Emotion gauge bars ---- */
+
+.gauge-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.gauge-label {
+  width: 60px;
+  font-size: 12px;
+  color: var(--color-text-dim);
+}
+
+.gauge-track {
+  flex: 1;
+  height: 8px;
+  background: var(--color-border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.gauge-fill {
+  height: 100%;
+  border-radius: 4px;
+}
+
+.gauge-fill.fear {
+  background: var(--civ-color-0);
+}
+
+.gauge-fill.joy {
+  background: var(--civ-color-2);
+}
+
+.gauge-fill.grief {
+  background: var(--civ-color-1);
+}
+
+.gauge-fill.anger {
+  background: #e4572e;
+}
+
+.gauge-fill.hope {
+  background: var(--lineage-opus);
+}
+
+/* ---- Skill gauge bars (inspector's Skills panel) ---- */
+
+.gauge-fill.farming {
+  background: var(--civ-color-2);
+}
+
+.gauge-fill.gathering {
+  background: var(--lineage-haiku);
+}
+
+.gauge-fill.building {
+  background: var(--terrain-mountain);
+}
+
+.gauge-fill.crafting {
+  background: var(--lineage-opus);
+}
+
+.gauge-fill.fighting {
+  background: var(--civ-color-0);
+}
+
+.gauge-fill.healing {
+  background: var(--civ-color-1);
+}
+
+.gauge-fill.teaching {
+  background: var(--civ-color-3);
+}
+
+/* ---- Lineage badges ---- */
+
+.badge-lineage {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-bg);
+}
+
+.badge-lineage.opus {
+  background: var(--lineage-opus);
+}
+
+.badge-lineage.sonnet {
+  background: var(--lineage-sonnet);
+}
+
+.badge-lineage.haiku {
+  background: var(--lineage-haiku);
+}
+
+.badge-lineage.fable {
+  background: var(--lineage-fable);
+}
+
+/* ---- Layout: setup screen ---- */
+
+.setup-screen {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+  padding: 32px;
+  overflow-y: auto;
+}
+
+.mode-cards {
+  display: flex;
+  gap: 16px;
+}
+
+.mode-card {
+  width: 260px;
+  cursor: pointer;
+}
+
+.mode-card.selected {
+  border-color: var(--civ-color-1);
+}
+
+.setup-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 260px;
+}
+
+.setup-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* ---- Layout: run screen ---- */
+
+.run-screen {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-panel);
+}
+
+.run-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+#map-canvas-container {
+  flex: 1;
+  position: relative;
+  min-width: 0;
+}
+
+#map-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.dock {
+  width: var(--dock-width);
+  flex: 0 0 var(--dock-width);
+  border-left: 1px solid var(--color-border);
+  background: var(--color-panel);
+  overflow-y: auto;
+  padding: 12px;
+}
+
+/* ---- Event feed ---- */
+
+.feed-row {
+  padding: 6px 8px;
+  border-left: 3px solid var(--severity-1);
+  margin-bottom: 4px;
+  font-size: 12px;
+  background: var(--color-bg);
+  border-radius: 4px;
+}
+
+.feed-row.severity-1 {
+  border-left-color: var(--severity-1);
+}
+
+.feed-row.severity-2 {
+  border-left-color: var(--severity-2);
+}
+
+.feed-row.severity-3 {
+  border-left-color: var(--severity-3);
+}
