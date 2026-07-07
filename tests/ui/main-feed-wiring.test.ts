@@ -35,11 +35,21 @@ vi.mock('../../src/ui/map', async () => {
   return { ...actual, MapView: FakeMapView };
 });
 
+// mountApp's Task 44 resume-on-startup check (listRuns() against the real,
+// unmocked storage.ts) is asynchronous — jsdom has no real indexedDB, so the
+// real listRuns() call rejects a few microtask hops later and mountApp's
+// .catch() is what renders the setup screen. A macrotask flush reliably
+// waits past that regardless of the exact microtask hop count.
+function flushMicrotasks(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 describe('main.ts wires the event feed to every snapshot', () => {
   it('feeding a snapshot with recentEvents populates the feed panel', async () => {
     const mod = await import('../../src/ui/main');
     const root = document.createElement('div');
     mod.mountApp(root);
+    await flushMicrotasks();
     (root.querySelector('[data-testid="begin-button"]') as HTMLButtonElement).click();
 
     const client = mod.activeClient as unknown as { fireSnapshot: (s: unknown) => void };

@@ -7,6 +7,7 @@ import { MapView } from './map';
 import { renderInspector } from './inspector';
 import { renderDashboard } from './dashboard';
 import { renderFeed } from './feed';
+import { AUTOSAVE_NAME, listRuns, loadRun, saveRun, startAutosave } from './storage';
 import type { SimConfig } from '../shared/types';
 import type { Snapshot } from '../shared/protocol';
 
@@ -64,73 +65,203 @@ function renderRunScreenShell(): HTMLElement {
 }
 
 /**
- * Additive app-bootstrap entry point (not a contract symbol). Renders the
- * setup screen into `root`; on Begin, replaces root's contents with the run
- * screen shell (empty containers only — Task 39 is the next task to modify
- * this file, wiring SimClient/controls/map/inspector/dashboard/feed into
- * the containers created here).
+ * Additive app-bootstrap entry point (not a contract symbol). This task
+ * (44) replaces every earlier task's incrementally-patched `mountApp` body
+ * wholesale: the resume-on-startup path (loading `__autosave`) needs to
+ * reach the exact same map/inspector/dashboard/feed wiring as the normal
+ * Begin path, so both are factored into one shared `beginRun` function
+ * instead of leaving the four separate incremental patch sites Tasks
+ * 39/41/42/43 each appended to `handle.onBegin`.
+ *
+ * Deviation from the brief's literal `document.getElementById(...)` calls
+ * throughout Step 9: that only resolves elements attached to the live
+ * `document`, but `root` (and therefore the run screen shell appended to
+ * it) is not guaranteed to be document-attached — every UI wiring test in
+ * this suite (including this task's own main-storage-wiring.test.ts) mounts
+ * into a detached `document.createElement('div')`. `root.querySelector`
+ * matches the pattern this file has used since Task 39 for these same
+ * containers and works regardless of attachment.
  */
 export function mountApp(root: HTMLElement): void {
   ensureThemeLinked();
   root.innerHTML = '';
-  const handle = renderSetupScreen(root);
-  handle.onBegin((config) => {
-    pendingConfig = config;
+
+  function startNormally(): void {
+    const handle = renderSetupScreen(root);
+    wireBegin(handle);
+  }
+
+  function wireBegin(handle: ReturnType<typeof renderSetupScreen>): void {
+    handle.onBegin((config) => {
+      pendingConfig = config;
+      beginRun(config, { type: 'init', config });
+    });
+  }
+
+  function beginRun(
+    config: SimConfig,
+    initialMessage: { type: 'init'; config: SimConfig } | { type: 'load'; json: string },
+  ): void {
     root.innerHTML = '';
     const runScreen = renderRunScreenShell();
     root.appendChild(runScreen);
 
-    const client = new SimClient();
+    const client = new SimClient({ recover: () => loadRun(AUTOSAVE_NAME) });
     activeClient = client;
+    // start() always constructs the worker and sends 'init' first (per
+    // SimClient's contract shape, Task 39) so the worker exists either way;
+    // the resume path immediately follows up with 'load', which the worker
+    // protocol (Task 37) treats as a full replacement of the just-created
+    // Simulation — a harmless, documented double-construction, not a bug,
+    // since 'load' unconditionally overwrites WorkerState.sim.
     client.start(config);
+    if (initialMessage.type === 'load') client.send(initialMessage);
 
-    // Deviation from the brief's literal `document.getElementById(...)`: that
-    // only resolves elements attached to the live `document`, but `root` (and
-    // therefore the run screen shell just appended to it) is not guaranteed
-    // to be document-attached — tests/ui/main.test.ts and
-    // tests/ui/main-controls-wiring.test.ts both mount into a detached
-    // `document.createElement('div')`. `root.querySelector` matches the
-    // pattern main.test.ts already uses for these same containers and works
-    // regardless of attachment, while still being non-null immediately after
-    // `root.appendChild(runScreen)` since renderRunScreenShell always creates
-    // the element.
     const controlsHandle = renderControls(root.querySelector('#topbar-controls')!, client);
-    client.onSnapshot((snapshot) => {
-      latestSnapshot = snapshot;
-      controlsHandle.setReadout(snapshot.year, snapshot.season, snapshot.population);
-    });
-
     const mapView = new MapView(root.querySelector('#map-canvas') as HTMLCanvasElement);
-    client.onSnapshot((snapshot) => {
-      mapView.render(snapshot);
-    });
-    client.onTerrain((tiles, worldSize) => {
-      mapView.setTerrain(tiles, worldSize);
-    });
-
     const inspectorHandle = renderInspector(root.querySelector('#dock-inspector')!, {
       onFollow: (personId) => {
         client.send({ type: 'inspect', personId });
       },
     });
+    const dashboardHandle = renderDashboard(root.querySelector('#dock-dashboard')!);
+    const feedHandle = renderFeed(root.querySelector('#dock-feed')!);
+
+    client.onSnapshot((snapshot) => {
+      latestSnapshot = snapshot;
+      controlsHandle.setReadout(snapshot.year, snapshot.season, snapshot.population);
+      mapView.render(snapshot);
+      dashboardHandle.onSnapshot(snapshot);
+      const civNames = new Map(snapshot.metrics.map((m) => [m.civId, m.name] as [number, string]));
+      feedHandle.push(snapshot.recentEvents, civNames);
+    });
     client.onInspect((detail) => {
       inspectorHandle.show(detail);
+    });
+    client.onTerrain((tiles, worldSize) => {
+      mapView.setTerrain(tiles, worldSize);
     });
     mapView.onPickPerson((personId) => {
       client.send({ type: 'inspect', personId });
     });
 
-    const dashboardHandle = renderDashboard(root.querySelector('#dock-dashboard')!);
-    client.onSnapshot((snapshot) => {
-      dashboardHandle.onSnapshot(snapshot);
+    startAutosave(client);
+    wireIoButtons(client);
+  }
+
+  function wireIoButtons(client: SimClient): void {
+    const ioContainer = root.querySelector('#topbar-io')!;
+    const saveNameInput = el('input', {
+      type: 'text',
+      class: 'btn',
+      'data-testid': 'save-name-input',
+      value: 'my-run',
+    }) as HTMLInputElement;
+
+    // SimClient's onSerialized is append-only/never-unsubscribed (see
+    // storage.ts's startAutosave doc comment). To avoid leaving a fresh
+    // listener alive on every click — which would fire on every future
+    // serialize response from ANY source (autosave, the other button, or a
+    // later click) and silently save/export under a stale name — this
+    // function registers exactly ONE persistent onSerialized listener, once,
+    // here at setup time. It dispatches based on a `pendingAction` flag set
+    // immediately before each `client.send({ type: 'serialize' })` call and
+    // cleared right after handling, so exactly one action fires per
+    // serialize response no matter how many times Save/Export are clicked.
+    type PendingAction = { kind: 'save'; name: string } | { kind: 'export'; name: string } | null;
+    let pendingAction: PendingAction = null;
+    client.onSerialized((json) => {
+      const action = pendingAction;
+      pendingAction = null;
+      if (action === null) return; // e.g. autosave's own periodic serialize
+      if (action.kind === 'save') {
+        void saveRun(action.name, json);
+        return;
+      }
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = el('a', { href: url, download: `${action.name}.json` }) as HTMLAnchorElement;
+      link.click();
+      URL.revokeObjectURL(url);
     });
 
-    const feedHandle = renderFeed(root.querySelector('#dock-feed')!);
-    client.onSnapshot((snapshot) => {
-      const civNames = new Map(snapshot.metrics.map((m) => [m.civId, m.name] as [number, string]));
-      feedHandle.push(snapshot.recentEvents, civNames);
+    const saveButton = el('button', { class: 'btn', type: 'button', 'data-testid': 'save-button' }, 'Save');
+    saveButton.addEventListener('click', () => {
+      pendingAction = { kind: 'save', name: saveNameInput.value };
+      client.send({ type: 'serialize' });
     });
-  });
+
+    const loadButton = el('button', { class: 'btn', type: 'button', 'data-testid': 'load-button' }, 'Load');
+    loadButton.addEventListener('click', () => {
+      void loadRun(saveNameInput.value).then((json) => {
+        if (json !== null) client.send({ type: 'load', json });
+      });
+    });
+
+    const exportButton = el('button', { class: 'btn', type: 'button', 'data-testid': 'export-button' }, 'Export');
+    exportButton.addEventListener('click', () => {
+      pendingAction = { kind: 'export', name: saveNameInput.value };
+      client.send({ type: 'serialize' });
+    });
+
+    const importInput = el('input', {
+      type: 'file',
+      accept: 'application/json',
+      'data-testid': 'import-file-input',
+      style: 'display:none',
+    }) as HTMLInputElement;
+    importInput.addEventListener('change', () => {
+      const file = importInput.files?.[0];
+      if (file === undefined) return;
+      void file.text().then((json) => {
+        client.send({ type: 'load', json });
+      });
+    });
+    const importButton = el('button', { class: 'btn', type: 'button', 'data-testid': 'import-button' }, 'Import');
+    importButton.addEventListener('click', () => importInput.click());
+
+    ioContainer.appendChild(saveNameInput);
+    ioContainer.appendChild(saveButton);
+    ioContainer.appendChild(loadButton);
+    ioContainer.appendChild(exportButton);
+    ioContainer.appendChild(importButton);
+    ioContainer.appendChild(importInput);
+  }
+
+  void listRuns()
+    .then((runs) => {
+      const hasAutosave = runs.some((r) => r.name === AUTOSAVE_NAME);
+      if (!hasAutosave) {
+        startNormally();
+        return;
+      }
+      const prompt = el(
+        'div',
+        { class: 'panel', 'data-testid': 'resume-prompt' },
+        el('p', {}, 'Resume previous run?'),
+        el('button', { class: 'btn btn-primary', type: 'button', 'data-testid': 'resume-yes' }, 'Resume'),
+        el('button', { class: 'btn', type: 'button', 'data-testid': 'resume-no' }, 'No'),
+      );
+      root.appendChild(prompt);
+      prompt.querySelector('[data-testid="resume-yes"]')?.addEventListener('click', () => {
+        void loadRun(AUTOSAVE_NAME).then((json) => {
+          if (json === null) {
+            startNormally();
+            return;
+          }
+          const restoredConfig = (JSON.parse(json) as { config: SimConfig }).config;
+          pendingConfig = restoredConfig;
+          beginRun(restoredConfig, { type: 'load', json });
+        });
+      });
+      prompt.querySelector('[data-testid="resume-no"]')?.addEventListener('click', () => {
+        root.innerHTML = '';
+        startNormally();
+      });
+    })
+    .catch(() => {
+      startNormally();
+    });
 }
 
 const appRoot = document.getElementById('app');
