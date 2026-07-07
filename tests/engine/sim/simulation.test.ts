@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { Simulation, TICK_PHASES } from '../../../src/engine/sim/simulation';
+import { Simulation, TICK_PHASES, makeDisasterWitnessEvents } from '../../../src/engine/sim/simulation';
+import type { NarrativeEvent } from '../../../src/engine/sim/events';
 import { createRng } from '../../../src/engine/rng';
 import type { SimConfig } from '../../../src/shared/types';
 
@@ -245,5 +246,100 @@ describe('Simulation — narration wiring (Task 33 wires every narrate*/pushEven
   it('never emits birth/death/settlement/tech/religion/raid/war/famine/disaster events before Simulation.tick() has run at least once', () => {
     const sim = new Simulation(baseConfig({ startPopulation: 200 }));
     expect(sim.ctx.events).toEqual([]);
+  });
+});
+
+describe('Simulation — Task 33 review fixes (disaster-witness founding, counters, raid dedupe)', () => {
+  it('makeDisasterWitnessEvents keeps severity-2 disaster kinds in-window and emits severity-3 witness events', () => {
+    const events: NarrativeEvent[] = [
+      { tick: 10, kind: 'famine', severity: 2, civId: 0, text: 'seeded famine' },
+      { tick: 10, kind: 'birth', severity: 1, civId: 0, text: 'not a disaster kind' },
+      { tick: 10, kind: 'war-declared', severity: 3, civId: 0, text: 'severity 3 but not a disaster kind' },
+      { tick: 5, kind: 'drought', severity: 2, civId: 1, text: 'second civ drought' },
+      { tick: 12, kind: 'raid', severity: 1, civId: 0, text: 'below severity floor' },
+    ];
+    // Both severity-2 disasters pass; wrong kinds and sub-2 severity are dropped;
+    // every witness event is emitted at the fixed severity-3 founding sentinel.
+    expect(makeDisasterWitnessEvents(events, 20, 30)).toEqual([
+      { tick: 10, civId: 0, severity: 3 },
+      { tick: 5, civId: 1, severity: 3 },
+    ]);
+    // Window arithmetic: at tick 40 the famine (40-10=30) is still inside an
+    // inclusive 30-tick window; the drought (40-5=35) has aged out.
+    expect(makeDisasterWitnessEvents(events, 40, 30)).toEqual([{ tick: 10, civId: 0, severity: 3 }]);
+    // Future events (tick - e.tick < 0) never count.
+    expect(makeDisasterWitnessEvents(events, 3, 30)).toEqual([]);
+  });
+
+  it('a witnessed disaster leads to a religion founding end-to-end (the pre-fix filter made this impossible)', () => {
+    const sim = new Simulation(baseConfig({ startPopulation: 200 }));
+    const civId = sim.ctx.civs[0]!.id;
+    // Seed one severity-2 famine into the log (the real narration severity for
+    // disasters) and maintain ten deterministic qualifying witnesses
+    // (sanctity > 0.7, influence > 0.5) so the 0.02/candidate/tick founding
+    // roll is overwhelmingly likely to fire within the 30-tick window.
+    sim.ctx.events.push({ tick: sim.ctx.tick, kind: 'famine', severity: 2, civId, text: 'seeded famine' });
+    const witnesses = sim.ctx.people.filter((p) => p.alive).slice(0, 10);
+    for (let t = 0; t < 30 && !sim.ctx.events.some((e) => e.kind === 'religion-founded'); t++) {
+      for (const w of witnesses) {
+        w.morality.sanctity = 0.9;
+        w.influence = 0.9;
+      }
+      sim.tick();
+    }
+    expect(sim.ctx.events.some((e) => e.kind === 'religion-founded')).toBe(true);
+    expect(sim.ctx.religions.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('counters.births/deaths equal the exact observed per-tick population changes (no double-count)', () => {
+    const sim = new Simulation(baseConfig({ startPopulation: 200 }));
+    let sawBirth = false;
+    let sawDeath = false;
+    for (let i = 0; i < 750; i++) {
+      const totalBefore = sim.ctx.people.length;
+      const deadBefore = sim.ctx.people.filter((p) => !p.alive).length;
+      sim.tick();
+      const newPeople = sim.ctx.people.length - totalBefore;
+      const newDead = sim.ctx.people.filter((p) => !p.alive).length - deadBefore;
+      expect(sim.ctx.counters.births).toBe(newPeople);
+      expect(sim.ctx.counters.deaths).toBe(newDead);
+      if (newPeople > 0) sawBirth = true;
+      if (newDead > 0) sawDeath = true;
+    }
+    // The window is long enough (first birth for this seed lands by ~531; see
+    // the 700-tick birth test above) that both counters are actually exercised
+    // at nonzero values — without this the equality checks could pass vacuously.
+    expect(sawBirth).toBe(true);
+    expect(sawDeath).toBe(true);
+  });
+
+  it('narrates at most one raid event per settlement pair per tick (participant-level dedupe)', () => {
+    const sim = new Simulation(baseConfig({ mode: 'civs', startPopulation: 200 }));
+    for (let i = 0; i < 800; i++) {
+      sim.tick();
+      // Oracle: recompute the distinct unordered settlement pairs among this
+      // tick's fresh victory/defeat memories, exactly as the narration pass
+      // defines a "raid" — the emitted raid events must match one-per-pair.
+      const pairs = new Set<string>();
+      for (const p of sim.ctx.people) {
+        const latest = p.memory[0];
+        if (latest === undefined || latest.tick !== sim.ctx.tick) continue;
+        if (latest.kind !== 'victory' && latest.kind !== 'defeat') continue;
+        const other = sim.ctx.personById.get(latest.otherId);
+        if (other === undefined) continue;
+        const a = p.settlementId;
+        const b = other.settlementId;
+        if (a === null || b === null || a === b) continue;
+        pairs.add(a < b ? `${a}:${b}` : `${b}:${a}`);
+      }
+      const raidEventsThisTick = sim.ctx.events.filter(
+        (e) => e.kind === 'raid' && e.tick === sim.ctx.tick,
+      ).length;
+      expect(raidEventsThisTick).toBe(pairs.size);
+    }
+    // Note: raids depend on emergent scarcity/aggression and may not occur for
+    // every seed within this horizon; the per-tick equality above is the
+    // regression net either way (a participant-level duplicate would break it
+    // on the first raid that ever fires).
   });
 });

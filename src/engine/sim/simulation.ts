@@ -84,6 +84,10 @@ export const RNG_LABEL_EVENTS = 'events';
 export const RNG_LABEL_SOCIETY = 'society';
 export const RNG_LABEL_LIFECYCLE = 'lifecycle';
 
+// 'harsh-winter' is deliberately excluded: it is a routine seasonal hardship
+// (rolled every winter with its own chance, map-wide, never civ-ending) that
+// needs.ts/lifecycle.ts already model as ambient attrition, not the kind of
+// singular calamity that plausibly moves someone to found a religion.
 const DISASTER_EVENT_KINDS = new Set(['famine', 'drought', 'disease', 'raid']);
 const RELIGION_EVENT_WINDOW = 30;
 
@@ -116,7 +120,25 @@ export interface EngineCtx {
   onPhase?: (phase: string) => void;
 }
 
-/** Concrete side of Section 6 deviation 7: builds the DisasterWitnessEvent[] religion.ts needs from the event log. */
+/**
+ * Concrete side of Section 6 deviation 7: builds the DisasterWitnessEvent[]
+ * religion.ts needs from the event log.
+ *
+ * Semantic note (Task 33 review fix): this filters candidate events by KIND
+ * (DISASTER_EVENT_KINDS) with severity >= 2, not by matching the source
+ * NarrativeEvent's severity to religion.ts's gate value. Disaster narration
+ * in tick() is pushed at severity 2 (regional, not civ-ending) and severity 3
+ * is reserved elsewhere in the feed taxonomy for war-declared/schism/
+ * extinction — so requiring severity === 3 here on the *source* event would
+ * make this function permanently return [] (the original bug: every disaster
+ * was silently dropped and maybeFoundReligion never received a witness).
+ * religion.ts's own maybeFoundReligion separately hard-gates on
+ * `e.severity === 3` for the *DisasterWitnessEvent* it receives (its founding
+ * threshold, not a passthrough of narration severity), so the witness event
+ * pushed below is always constructed with severity: 3 — a fixed "this counts
+ * as founding-worthy" sentinel, decoupled from the originating narration's
+ * own severity field.
+ */
 export function makeDisasterWitnessEvents(
   events: NarrativeEvent[],
   tick: Tick,
@@ -124,10 +146,10 @@ export function makeDisasterWitnessEvents(
 ): DisasterWitnessEvent[] {
   const out: DisasterWitnessEvent[] = [];
   for (const e of events) {
-    if (e.severity !== 3) continue;
     if (!DISASTER_EVENT_KINDS.has(e.kind)) continue;
+    if (e.severity < 2) continue;
     if (tick - e.tick < 0 || tick - e.tick > window) continue;
-    out.push({ tick: e.tick, civId: e.civId ?? -1, severity: e.severity });
+    out.push({ tick: e.tick, civId: e.civId ?? -1, severity: 3 });
   }
   return out;
 }
@@ -147,6 +169,13 @@ export class Simulation {
     this.config = config;
     const rootRng = createRng(config.seed);
     const worldRng = rootRng.split(RNG_LABEL_WORLD);
+    // eventsRng/societyRng/lifecycleRng: intentionally unused streams. These
+    // splits exist only so the RNG_LABEL_* constants are exercised once at
+    // construction time and documented for save.ts determinism (a save/load
+    // round-trip must reproduce the same label namespace); the real
+    // per-subsystem randomness is drawn per-tick via ctx.rng.split(...) calls
+    // scattered through tick() (e.g. `p${p.id}`, `events-${ctx.tick}`), which
+    // is the actual determinism mechanism — not these constructor-time splits.
     const eventsRng = rootRng.split(RNG_LABEL_EVENTS);
     const societyRng = rootRng.split(RNG_LABEL_SOCIETY);
     const lifecycleRng = rootRng.split(RNG_LABEL_LIFECYCLE);
@@ -249,10 +278,14 @@ export class Simulation {
       if (!ctx.personById.has(p.id)) ctx.personById.set(p.id, p);
     }
     // Births: every person appended to ctx.people during this phase.
+    // Counters note (Task 33 review fix): ctx.counters.births/deaths are
+    // owned exclusively by lifecycle.ts (it increments them at the exact
+    // birth/death sites inside updateLifecycle, see lifecycle.ts). This loop
+    // only narrates — it must never also increment ctx.counters, or every
+    // birth/death would be counted twice (once here, once in lifecycle.ts).
     for (let i = rosterCountBefore; i < ctx.people.length; i++) {
       const child = ctx.people[i];
       if (child === undefined || child.parentIds === null) continue;
-      ctx.counters.births += 1;
       const mother = ctx.personById.get(child.parentIds[0]);
       const father = ctx.personById.get(child.parentIds[1]);
       pushEvent(
@@ -263,11 +296,11 @@ export class Simulation {
         narrateBirth(child.name, mother?.name ?? 'someone', father?.name ?? 'someone'),
       );
     }
-    // Deaths: every previously-alive person now alive=false.
+    // Deaths: every previously-alive person now alive=false. (Counters owned
+    // by lifecycle.ts — see note above; no ctx.counters.deaths increment here.)
     for (const p of ctx.people) {
       if (!aliveIdsBefore.has(p.id)) continue;
       if (p.alive) continue;
-      ctx.counters.deaths += 1;
       pushEvent(ctx, 'death', p.causeOfDeath === 'old-age' ? 1 : 2, p.civId, narrateDeath(p.name, p.causeOfDeath ?? 'unknown causes'));
     }
     emit(ctx, 'lifecycle');
@@ -351,10 +384,29 @@ export class Simulation {
         pushEvent(ctx, 'peace', 2, civ.id, narratePeace(civ.name, other?.name ?? 'an unknown people'));
       }
     }
-    for (const p of ctx.people) {
+    // Dedupe note (Task 33 review fix): resolveRaid records a 'victory'/
+    // 'defeat' memory on EVERY combatant on BOTH sides (all attackers, all
+    // defenders), so a naive per-person scan pushed one 'raid' event per
+    // participant — a single raid with, say, 6 attackers + 4 defenders
+    // narrated as 10 duplicate events. Every combatant of one raid resolves
+    // to the same unordered pair of settlements (their own settlementId, and
+    // the settlementId of the person recorded at memory.otherId), so keying
+    // on that pair collapses one raid to exactly one event while still
+    // letting two distinct raids (different settlement pairs) this same
+    // tick narrate separately.
+    const narratedRaidPairs = new Set<string>();
+    for (const p of [...ctx.people].sort((a, b) => a.id - b.id)) {
       const latest = p.memory[0];
       if (latest === undefined || latest.tick !== ctx.tick) continue;
       if (latest.kind !== 'victory' && latest.kind !== 'defeat') continue;
+      const other = ctx.personById.get(latest.otherId);
+      if (other === undefined) continue;
+      const sIdA = p.settlementId;
+      const sIdB = other.settlementId;
+      if (sIdA === null || sIdB === null || sIdA === sIdB) continue;
+      const pairKey = sIdA < sIdB ? `${sIdA}:${sIdB}` : `${sIdB}:${sIdA}`;
+      if (narratedRaidPairs.has(pairKey)) continue;
+      narratedRaidPairs.add(pairKey);
       const settlement = ctx.settlements.find((s) => s.id === p.settlementId);
       const attackerWon = latest.kind === 'victory';
       const attackerCiv = ctx.civs.find((c) => c.id === p.civId);
