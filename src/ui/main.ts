@@ -1,10 +1,17 @@
 import { el } from './dom';
 import { THEME_CSS_PATH } from './dom';
 import { renderSetupScreen } from './setup';
+import { SimClient } from './client';
+import { renderControls } from './controls';
 import type { SimConfig } from '../shared/types';
+import type { Snapshot } from '../shared/protocol';
 
 /** Set by the setup screen's onBegin handler; read by Task 39's main.ts modification. */
 export let pendingConfig: SimConfig | null = null;
+/** The single SimClient instance for the app; Tasks 40-44 read this rather than constructing another worker. */
+export let activeClient: SimClient | null = null;
+/** Updated inside the onSnapshot subscription that also drives the controls readout. */
+export let latestSnapshot: Snapshot | null = null;
 
 function ensureThemeLinked(): void {
   const already = document.head.querySelector(`link[rel="stylesheet"][href="${THEME_CSS_PATH}"]`);
@@ -66,7 +73,28 @@ export function mountApp(root: HTMLElement): void {
   handle.onBegin((config) => {
     pendingConfig = config;
     root.innerHTML = '';
-    root.appendChild(renderRunScreenShell());
+    const runScreen = renderRunScreenShell();
+    root.appendChild(runScreen);
+
+    const client = new SimClient();
+    activeClient = client;
+    client.start(config);
+
+    // Deviation from the brief's literal `document.getElementById(...)`: that
+    // only resolves elements attached to the live `document`, but `root` (and
+    // therefore the run screen shell just appended to it) is not guaranteed
+    // to be document-attached — tests/ui/main.test.ts and
+    // tests/ui/main-controls-wiring.test.ts both mount into a detached
+    // `document.createElement('div')`. `root.querySelector` matches the
+    // pattern main.test.ts already uses for these same containers and works
+    // regardless of attachment, while still being non-null immediately after
+    // `root.appendChild(runScreen)` since renderRunScreenShell always creates
+    // the element.
+    const controlsHandle = renderControls(root.querySelector('#topbar-controls')!, client);
+    client.onSnapshot((snapshot) => {
+      latestSnapshot = snapshot;
+      controlsHandle.setReadout(snapshot.year, snapshot.season, snapshot.population);
+    });
   });
 }
 

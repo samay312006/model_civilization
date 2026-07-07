@@ -14,7 +14,14 @@ import type { SimConfig } from '../../src/shared/types';
 const config: SimConfig = { seed: 5, mode: 'mixed', mapSize: 'small', startPopulation: 200 };
 
 function freshState(): WorkerState {
-  return { sim: null, ticksPerSecond: 0, ticksSinceLastSnapshot: 0, snapshotsTaken: 0, msAccumulatorSinceSnapshot: 0 };
+  return {
+    sim: null,
+    ticksPerSecond: 0,
+    ticksSinceLastSnapshot: 0,
+    snapshotsTaken: 0,
+    msAccumulatorSinceSnapshot: 0,
+    tickRemainder: 0,
+  };
 }
 
 describe('handleMessage — init', () => {
@@ -170,6 +177,55 @@ describe('advanceByBatch', () => {
     const { state } = advanceByBatch(running);
     expect(state.sim?.ctx.tick).toBe(100);
     expect(BATCH_INTERVAL_MS).toBe(100);
+  });
+
+  // Preset-preservation check (mandated fix, Task 39/controller ruling on
+  // Task 37's speed-batching review): 10/60/360/1000 ticks/sec all divide
+  // BATCH_INTERVAL_MS/1000 to a whole number of ticks per batch, so the
+  // fractional-remainder accumulator below must land on the exact same
+  // per-batch tick counts the old Math.round formula already produced.
+  it('at 60 ticks/sec advances exactly 6 ticks per call, unchanged by the fractional-remainder accumulator', () => {
+    const { state: afterInit } = handleMessage(freshState(), { type: 'init', config });
+    const running = { ...afterInit, ticksPerSecond: 60 };
+    const { state } = advanceByBatch(running);
+    expect(state.sim?.ctx.tick).toBe(6);
+    expect(state.tickRemainder).toBe(0);
+  });
+
+  // Mandated fix (controller ruling, Task 37 follow-up via Task 39): at the
+  // 1 tick/sec preset, BATCH_INTERVAL_MS(100ms) owes only 0.1 engine ticks,
+  // and the old `Math.round(0.1)` formula floored that to 0 forever — the
+  // sim never advanced while "running" at 1x. `advanceByBatch` now carries
+  // the 0.1 fractional remainder across batches in `state.tickRemainder`, so
+  // the owed amount crosses 1.0 on the 10th batch (10 batches of 100ms =
+  // 1 simulated second), producing exactly one tick per second at 1x - and
+  // then repeats steady-state on the next 10 batches, proving this is true
+  // periodic accumulation rather than a one-off rounding coincidence.
+  it('at 1 tick/sec, advances exactly 1 tick per 10 batches (1 simulated second), not 0 forever', () => {
+    const { state: afterInit } = handleMessage(freshState(), { type: 'init', config });
+    let running = { ...afterInit, ticksPerSecond: 1 };
+    const startTick = running.sim?.ctx.tick ?? -1;
+
+    for (let i = 0; i < 10; i++) {
+      const { state } = advanceByBatch(running);
+      running = state;
+    }
+    expect(running.sim?.ctx.tick).toBe(startTick + 1);
+
+    for (let i = 0; i < 10; i++) {
+      const { state } = advanceByBatch(running);
+      running = state;
+    }
+    expect(running.sim?.ctx.tick).toBe(startTick + 2);
+  });
+
+  it('0 ticks/sec still pauses (no-op) even with the fractional-tick accumulator in play', () => {
+    const { state: afterInit } = handleMessage(freshState(), { type: 'init', config });
+    const paused = { ...afterInit, ticksPerSecond: 0, tickRemainder: 0.9 };
+    const { state, replies } = advanceByBatch(paused);
+    expect(state.sim?.ctx.tick).toBe(0);
+    expect(state.tickRemainder).toBe(0.9);
+    expect(replies).toEqual([]);
   });
 
   it('emits a snapshot roughly every SNAPSHOT_INTERVAL_MS of accumulated batch time', () => {

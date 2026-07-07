@@ -5,6 +5,7 @@ import type {
   RelationKind,
   Season,
   StructureKind,
+  Terrain,
   Tick,
   SimConfig,
 } from './types';
@@ -93,7 +94,10 @@ export type WorkerToUi =
   | { type: 'snapshot'; snapshot: Snapshot }
   | { type: 'inspect'; detail: PersonDetail | null }
   | { type: 'serialized'; json: string }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  /** Forward-declared for Task 39's SimClient.onTerrain; Task 40 is the first
+   * to actually have the worker emit this. Not sent by handleMessage/advanceByBatch yet. */
+  | { type: 'terrain'; tiles: { terrain: Terrain }[]; worldSize: number };
 
 /** Contract speed presets; 0 = paused. */
 export const SPEED_PRESETS: readonly number[] = [0, 1, 10, 60, 360, 1000];
@@ -112,6 +116,13 @@ export interface WorkerState {
   ticksSinceLastSnapshot: number;
   snapshotsTaken: number;
   msAccumulatorSinceSnapshot: number;
+  /**
+   * Fractional engine ticks carried between batches (mandated fix, Task 39).
+   * At ticksPerSecond=1, each 100ms batch owes 0.1 ticks; Math.round(0.1)=0
+   * would never advance the sim. Accumulating the remainder here lets 1 t/s
+   * emit exactly one tick every 10th batch instead of freezing forever.
+   */
+  tickRemainder: number;
 }
 
 function snapshotReply(state: WorkerState, includeTerritory: boolean): { state: WorkerState; reply: WorkerToUi } {
@@ -139,6 +150,7 @@ export function handleMessage(state: WorkerState, msg: UiToWorker): { state: Wor
           ticksSinceLastSnapshot: 0,
           snapshotsTaken: 0,
           msAccumulatorSinceSnapshot: 0,
+          tickRemainder: 0,
         };
         const { state: withSnap, reply } = snapshotReply(next, true);
         return { state: withSnap, replies: [{ type: 'ready' }, reply] };
@@ -185,6 +197,7 @@ export function handleMessage(state: WorkerState, msg: UiToWorker): { state: Wor
           ticksSinceLastSnapshot: 0,
           snapshotsTaken: 0,
           msAccumulatorSinceSnapshot: 0,
+          tickRemainder: 0,
         };
         const { state: withSnap, reply } = snapshotReply(next, true);
         return { state: withSnap, replies: [reply] };
@@ -197,20 +210,31 @@ export function handleMessage(state: WorkerState, msg: UiToWorker): { state: Wor
 
 /**
  * The interval-loop tick: at ticksPerSecond ticks/sec, BATCH_INTERVAL_MS of
- * wall time is Math.round(ticksPerSecond * BATCH_INTERVAL_MS / 1000) engine
- * ticks (100 ticks per call at the 1000 tick/s preset). Emits a snapshot
- * (with territory every TERRITORY_SNAPSHOT_EVERY-th snapshot) whenever the
+ * wall time owes `ticksPerSecond * BATCH_INTERVAL_MS / 1000` engine ticks
+ * per batch (100 ticks per call at the 1000 tick/s preset). That quantity is
+ * fractional below 10 ticks/sec (e.g. 0.1 at the 1 tick/s preset), so the
+ * whole-number part is taken with the fractional remainder carried forward
+ * in `state.tickRemainder` and added into the next batch's owed amount —
+ * this is what lets 1 tick/sec advance one tick every 10th batch instead of
+ * Math.round-ing down to 0 forever (mandated fix, Task 39/controller ruling
+ * on Task 37's speed-batching review). A tiny epsilon guards against
+ * floating-point drift (e.g. ten additions of 0.1 landing a hair under 1)
+ * rounding a due tick down to the wrong batch. Emits a snapshot (with
+ * territory every TERRITORY_SNAPSHOT_EVERY-th snapshot) whenever the
  * accumulator reaches SNAPSHOT_INTERVAL_MS.
  */
 export function advanceByBatch(state: WorkerState): { state: WorkerState; replies: WorkerToUi[] } {
   if (state.sim === null || state.ticksPerSecond === 0) {
     return { state, replies: [] };
   }
-  const ticksThisBatch = Math.round((state.ticksPerSecond * BATCH_INTERVAL_MS) / 1000);
+  const owedTicks = state.tickRemainder + (state.ticksPerSecond * BATCH_INTERVAL_MS) / 1000;
+  const ticksThisBatch = Math.floor(owedTicks + 1e-9);
+  const tickRemainder = owedTicks - ticksThisBatch;
   for (let i = 0; i < ticksThisBatch; i++) state.sim.tick();
 
   let next: WorkerState = {
     ...state,
+    tickRemainder,
     ticksSinceLastSnapshot: state.ticksSinceLastSnapshot + ticksThisBatch,
     msAccumulatorSinceSnapshot: state.msAccumulatorSinceSnapshot + BATCH_INTERVAL_MS,
   };
