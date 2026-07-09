@@ -207,13 +207,15 @@ describe('renderInspector — populated state', () => {
     expect(container.querySelectorAll('[data-testid="relationships-list"] li')).toHaveLength(0);
   });
 
-  it('clicking Follow calls onFollow with the person id', () => {
+  it('clicking Follow calls onFollow with the full detail, including the person\'s position', () => {
     stubAllCanvasContexts();
     const container = document.createElement('div');
     const onFollow = vi.fn();
     const handle = renderInspector(container, { onFollow });
-    handle.show(makeDetail());
+    const detail = makeDetail();
+    handle.show(detail);
     (container.querySelector('[data-testid="follow-button"]') as HTMLButtonElement).click();
-    expect(onFollow).toHaveBeenCalledWith(7);
+    expect(onFollow).toHaveBeenCalledWith(detail);
+    expect(onFollow.mock.calls[0]?.[0].person.pos).toEqual({ x: 10, y: 10 });
   });
 });

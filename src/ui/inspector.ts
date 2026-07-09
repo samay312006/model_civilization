@@ -10,6 +10,9 @@ export interface InspectorHandle {
   show(detail: PersonDetail | null): void;
 }
 
+/** Task 45 fix: Follow now hands back the full detail (not just personId) so callers can read `.person.pos` to center the map. */
+export type OnFollow = (detail: PersonDetail) => void;
+
 const EMOTION_ORDER: (keyof Emotions)[] = ['fear', 'joy', 'grief', 'anger', 'hope'];
 const MORALITY_AXES = ['care', 'fairness', 'loyalty', 'authority', 'sanctity', 'liberty'] as const;
 const YEAR_TICKS_LOCAL = 360;
@@ -20,7 +23,7 @@ function affinityColor(affinity: number): string {
   return 'var(--color-text-dim)';
 }
 
-export function renderInspector(container: HTMLElement, opts: { onFollow: (personId: number) => void }): InspectorHandle {
+export function renderInspector(container: HTMLElement, opts: { onFollow: OnFollow }): InspectorHandle {
   const root = el('div', { class: 'inspector' });
   container.innerHTML = '';
   container.appendChild(root);
@@ -127,7 +130,7 @@ export function renderInspector(container: HTMLElement, opts: { onFollow: (perso
     );
 
     const followButton = el('button', { class: 'btn', type: 'button', 'data-testid': 'follow-button' }, 'Follow');
-    followButton.addEventListener('click', () => opts.onFollow(person.id));
+    followButton.addEventListener('click', () => opts.onFollow(detail));
 
     root.appendChild(header);
     root.appendChild(meta);

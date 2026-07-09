@@ -120,8 +120,9 @@ export function mountApp(root: HTMLElement): void {
     const controlsHandle = renderControls(root.querySelector('#topbar-controls')!, client);
     const mapView = new MapView(root.querySelector('#map-canvas') as HTMLCanvasElement);
     const inspectorHandle = renderInspector(root.querySelector('#dock-inspector')!, {
-      onFollow: (personId) => {
-        client.send({ type: 'inspect', personId });
+      onFollow: (detail) => {
+        client.send({ type: 'inspect', personId: detail.person.id });
+        mapView.centerOn(detail.person.pos.x, detail.person.pos.y);
       },
     });
     const dashboardHandle = renderDashboard(root.querySelector('#dock-dashboard')!);

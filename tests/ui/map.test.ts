@@ -11,9 +11,10 @@ import {
   schismColor,
   screenToWorld,
   worldToScreen,
+  useLineageColor,
   type Camera,
 } from '../../src/ui/map';
-import type { Snapshot } from '../../src/shared/protocol';
+import type { CivMetrics, Snapshot } from '../../src/shared/protocol';
 
 describe('worldToScreen / screenToWorld', () => {
   const camera: Camera = { x: 50, y: 50, zoom: 4 };
@@ -140,6 +141,24 @@ describe('CIV_COLORS / LINEAGE_COLORS / TERRAIN_COLORS constants', () => {
   });
 });
 
+function makeCivMetrics(overrides: Partial<CivMetrics> = {}): CivMetrics {
+  return {
+    civId: 0,
+    name: 'Test Civ',
+    color: '#e4572e',
+    population: 1,
+    births: 0,
+    deaths: 0,
+    techCount: 0,
+    atWar: false,
+    lineageShare: { opus: 1, sonnet: 0, haiku: 0, fable: 0 },
+    avgMorality: { care: 0, fairness: 0, loyalty: 0, authority: 0, sanctity: 0, liberty: 0 },
+    avgEmotions: { fear: 0, joy: 0, grief: 0, anger: 0, hope: 0 },
+    foodPerCapita: 0,
+    ...overrides,
+  };
+}
+
 function makeSnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
   return {
     tick: 0,
@@ -147,6 +166,7 @@ function makeSnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
     season: 'spring',
     population: 2,
     worldSize: 96,
+    mode: 'civs',
     ids: Int32Array.from([1, 2]),
     xs: Float32Array.from([10, 20]),
     ys: Float32Array.from([10, 20]),
@@ -233,5 +253,36 @@ describe('MapView — construction and rendering do not throw', () => {
     canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 200, clientY: 200 }));
     canvas.dispatchEvent(new MouseEvent('mouseup', { clientX: 200, clientY: 200 }));
     expect(picked).toHaveBeenCalledWith(42);
+  });
+
+  it('centerOn moves the camera: a click at viewport center now picks an agent at the new center (worldToScreen round-trip)', () => {
+    const canvas = document.createElement('canvas');
+    Object.defineProperty(canvas, 'clientWidth', { value: 400, configurable: true });
+    Object.defineProperty(canvas, 'clientHeight', { value: 400, configurable: true });
+    canvas.getBoundingClientRect = () => ({ left: 0, top: 0, right: 400, bottom: 400, width: 400, height: 400, x: 0, y: 0, toJSON: () => '' });
+    stubCanvasContext(canvas);
+    const view = new MapView(canvas);
+    view.centerOn(80, 20);
+    view.render(makeSnapshot({ xs: Float32Array.from([80]), ys: Float32Array.from([20]), ids: Int32Array.from([99]), civIds: Int16Array.from([0]), lineages: Int8Array.from([0]), healths: Uint8Array.from([255]), moods: Uint8Array.from([0]), population: 1 }));
+    const picked = vi.fn();
+    view.onPickPerson(picked);
+    canvas.dispatchEvent(new MouseEvent('mousedown', { clientX: 200, clientY: 200 }));
+    canvas.dispatchEvent(new MouseEvent('mouseup', { clientX: 200, clientY: 200 }));
+    expect(picked).toHaveBeenCalledWith(99);
+  });
+});
+
+describe('useLineageColor (Snapshot.mode-keyed agent coloring)', () => {
+  it('lineage-colors in mixed mode even with 2 civ metrics (post-schism)', () => {
+    const snap = makeSnapshot({
+      mode: 'mixed',
+      metrics: [makeCivMetrics({ civId: 0 }), makeCivMetrics({ civId: 1 })],
+    });
+    expect(useLineageColor(snap)).toBe(true);
+  });
+
+  it('civ-colors in civs mode', () => {
+    const snap = makeSnapshot({ mode: 'civs', metrics: [makeCivMetrics({ civId: 0 })] });
+    expect(useLineageColor(snap)).toBe(false);
   });
 });

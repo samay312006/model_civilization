@@ -153,10 +153,15 @@ export function renderDashboard(container: HTMLElement): DashboardHandle {
   }
 
   function rebuild(snapshot: Snapshot): void {
-    if (isMixedMode === null) isMixedMode = snapshot.metrics.length === 1;
+    // Task 45 fix: keyed off Snapshot.mode (see map.ts's useLineageColor for
+    // the same reasoning) rather than `metrics.length === 1` — a schism can
+    // push a 2nd civ mid-run while the sim is still in mixed mode.
+    if (isMixedMode === null) isMixedMode = snapshot.mode === 'mixed';
     civOrder = snapshot.metrics.map((m) => m.civId).sort((a, b) => a - b);
     if (activeTabCivId === null) {
-      activeTabCivId = civOrder[0] ?? null;
+      // Mixed mode defaults to the Lineage Share headline tab; civs mode
+      // still defaults to the first civ tab.
+      activeTabCivId = isMixedMode ? 'lineage-share' : (civOrder[0] ?? null);
     }
 
     root.innerHTML = '';

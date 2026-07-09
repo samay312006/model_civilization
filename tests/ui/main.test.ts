@@ -1,5 +1,26 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+// Mirrors the FakeMapView used by main-controls-wiring.test.ts,
+// main-dashboard-wiring.test.ts, main-feed-wiring.test.ts, and
+// main-inspector-wiring.test.ts (Task 44/45 established pattern). A real
+// `new MapView(...)` throws under jsdom (no canvas.getContext implementation
+// without the `canvas` npm package) — this test clicks Begin, which
+// constructs a real MapView, so without this mock every test here would
+// throw/log canvas-context noise despite the assertions still incidentally
+// passing.
+vi.mock('../../src/ui/map', async () => {
+  const actual = await vi.importActual<typeof import('../../src/ui/map')>('../../src/ui/map');
+  class FakeMapView {
+    render(): void {}
+    onPickPerson(): void {}
+    onPickSettlement(): void {}
+    setTerrain(): void {}
+    centerOn(): void {}
+  }
+  return { ...actual, MapView: FakeMapView };
+});
+
 import { mountApp } from '../../src/ui/main';
 
 // mountApp's Task 44 resume-on-startup check (listRuns() against the real,

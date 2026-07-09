@@ -102,6 +102,7 @@ export function takeSnapshot(sim: Simulation, includeTerritory: boolean): Snapsh
     season: seasonOf(ctx.tick),
     population: n,
     worldSize: ctx.world.size,
+    mode: sim.config.mode,
     ids,
     xs,
     ys,

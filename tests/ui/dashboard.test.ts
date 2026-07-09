@@ -44,13 +44,14 @@ function makeMetrics(overrides: Partial<CivMetrics> = {}): CivMetrics {
   };
 }
 
-function makeSnapshot(metrics: CivMetrics[]): Snapshot {
+function makeSnapshot(metrics: CivMetrics[], mode: Snapshot['mode'] = 'civs'): Snapshot {
   return {
     tick: 360,
     year: 1,
     season: 'spring',
     population: metrics.reduce((a, m) => a + m.population, 0),
     worldSize: 96,
+    mode,
     ids: new Int32Array(0),
     xs: new Float32Array(0),
     ys: new Float32Array(0),
@@ -105,7 +106,10 @@ describe('renderDashboard — civs mode (multiple civs, no headline chart)', () 
     stubAllCanvasContexts();
     const container = document.createElement('div');
     const handle = renderDashboard(container);
-    handle.onSnapshot(makeSnapshot([makeMetrics({ civId: 0, births: 5, deaths: 2 })]));
+    // Single-civ metrics implies mixed mode (Task 45), whose default tab is
+    // now Lineage Share — click the civ tab to inspect its births/deaths.
+    handle.onSnapshot(makeSnapshot([makeMetrics({ civId: 0, births: 5, deaths: 2 })], 'mixed'));
+    (container.querySelector('[data-testid="civ-tab"]') as HTMLElement).click();
     const readout = container.querySelector('[data-testid="births-deaths"]');
     expect(readout?.textContent).toContain('5');
     expect(readout?.textContent).toContain('2');
@@ -115,7 +119,8 @@ describe('renderDashboard — civs mode (multiple civs, no headline chart)', () 
     stubAllCanvasContexts();
     const container = document.createElement('div');
     const handle = renderDashboard(container);
-    handle.onSnapshot(makeSnapshot([makeMetrics({ civId: 0, techCount: 3 })]));
+    handle.onSnapshot(makeSnapshot([makeMetrics({ civId: 0, techCount: 3 })], 'mixed'));
+    (container.querySelector('[data-testid="civ-tab"]') as HTMLElement).click();
     const chips = container.querySelectorAll('[data-testid="tech-chip"]');
     expect(chips.length).toBe(6); // TECH_IDS.length total slots
     const filled = Array.from(chips).filter((c) => c.classList.contains('filled'));
@@ -143,22 +148,30 @@ describe('renderDashboard — civs mode (multiple civs, no headline chart)', () 
     stubAllCanvasContexts();
     const container = document.createElement('div');
     const handle = renderDashboard(container);
-    handle.onSnapshot(makeSnapshot([makeMetrics({ civId: 0, avgMorality: { care: 0.5, fairness: 0.5, loyalty: 0.5, authority: 0.5, sanctity: 0.5, liberty: 0.5 } })]));
+    handle.onSnapshot(makeSnapshot([makeMetrics({ civId: 0, avgMorality: { care: 0.5, fairness: 0.5, loyalty: 0.5, authority: 0.5, sanctity: 0.5, liberty: 0.5 } })], 'mixed'));
+    (container.querySelector('[data-testid="civ-tab"]') as HTMLElement).click();
     expect(container.querySelector('[data-testid="culture-drift-chart"]')).not.toBeNull();
     // Feeding snapshots whose avgMorality diverges from the first-seen
-    // baseline must not throw, and the chart stays present across updates.
-    handle.onSnapshot(makeSnapshot([makeMetrics({ civId: 0, avgMorality: { care: 0.9, fairness: 0.1, loyalty: 0.5, authority: 0.5, sanctity: 0.5, liberty: 0.5 } })]));
+    // baseline must not throw, and the chart stays present across updates
+    // (activeTabCivId persists once set, so the civ tab stays selected).
+    handle.onSnapshot(makeSnapshot([makeMetrics({ civId: 0, avgMorality: { care: 0.9, fairness: 0.1, loyalty: 0.5, authority: 0.5, sanctity: 0.5, liberty: 0.5 } })], 'mixed'));
     expect(container.querySelector('[data-testid="culture-drift-chart"]')).not.toBeNull();
   });
 });
 
 describe('renderDashboard — mixed mode (single civ, headline lineage-share chart)', () => {
-  it('renders a lineage-share headline tab when the snapshot has exactly one civ', () => {
+  it('renders a lineage-share headline tab when the snapshot has exactly one civ, visible by default', () => {
     stubAllCanvasContexts();
     const container = document.createElement('div');
     const handle = renderDashboard(container);
-    handle.onSnapshot(makeSnapshot([makeMetrics({ civId: 0, name: 'Mixed Settlement' })]));
-    expect(container.querySelector('[data-testid="lineage-share-tab"]')).not.toBeNull();
+    handle.onSnapshot(makeSnapshot([makeMetrics({ civId: 0, name: 'Mixed Settlement' })], 'mixed'));
+    const lineageTab = container.querySelector('[data-testid="lineage-share-tab"]');
+    expect(lineageTab).not.toBeNull();
+    // Task 45 fix: mixed mode now defaults to the Lineage Share tab, not the
+    // first civ tab — assert it's active and its content is what's rendered.
+    expect(lineageTab?.classList.contains('active')).toBe(true);
+    expect(container.textContent).toContain('Lineage Share');
+    expect(container.querySelector('[data-testid="births-deaths"]')).toBeNull();
   });
 });
 

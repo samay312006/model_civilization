@@ -37,6 +37,17 @@ export function civColor(civId: number): string {
   return civId >= 0 && civId < CIV_COLORS.length ? (CIV_COLORS[civId] as string) : schismColor(civId);
 }
 
+/**
+ * Whether agent dots should be colored by lineage (mixed mode) rather than
+ * civ (civs mode). Keyed off Snapshot.mode, not `metrics.length` — a schism
+ * (culture.ts secede) can push a 2nd civ mid-run while the sim is still in
+ * mixed mode, and the old `metrics.length <= 1` heuristic silently flipped
+ * every agent to civ coloring the instant that happened.
+ */
+export function useLineageColor(snap: Pick<Snapshot, 'mode'>): boolean {
+  return snap.mode === 'mixed';
+}
+
 export interface Camera {
   x: number;
   y: number;
@@ -182,6 +193,12 @@ export class MapView {
       // (solid plains fill) drawn each frame in draw() below.
       this.terrainWorldSize = snapshot.worldSize;
     }
+    this.dirty = true;
+  }
+
+  /** Recenters the camera on a world position (e.g. the Inspector's Follow button); zoom is unchanged. */
+  centerOn(x: number, y: number): void {
+    this.camera = { ...this.camera, x, y };
     this.dirty = true;
   }
 
@@ -349,14 +366,14 @@ export class MapView {
 
   private drawAgents(snap: Snapshot, w: number, h: number): void {
     const ctx = this.ctx;
-    const useLineageColor = snap.metrics.length <= 1;
+    const lineageColored = useLineageColor(snap);
     for (let i = 0; i < snap.ids.length; i++) {
       const screen = worldToScreen({ x: snap.xs[i] as number, y: snap.ys[i] as number }, this.camera, w, h);
       const radius = Math.max(2, Math.min(4, 2 + this.camera.zoom / 12));
       const civId = snap.civIds[i] as number;
       const lineageIdx = snap.lineages[i] as number;
       const lineage = (['opus', 'sonnet', 'haiku', 'fable'] as const)[lineageIdx] ?? 'opus';
-      ctx.fillStyle = useLineageColor ? LINEAGE_COLORS[lineage] : civColor(civId);
+      ctx.fillStyle = lineageColored ? LINEAGE_COLORS[lineage] : civColor(civId);
       ctx.beginPath();
       ctx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
       ctx.fill();

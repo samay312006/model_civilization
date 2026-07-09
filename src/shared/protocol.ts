@@ -47,6 +47,8 @@ export interface Snapshot {
   season: Season;
   population: number;
   worldSize: number;
+  /** Mirrors sim.config.mode (Task 45 fix); replaces the fragile `metrics.length <= 1` mixed-mode heuristic. */
+  mode: 'civs' | 'mixed';
   ids: Int32Array;
   xs: Float32Array;
   ys: Float32Array;
